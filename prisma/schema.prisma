@@ -8,31 +8,42 @@ datasource db {
 }
 
 model User {
-  id      String   @id
-  email   String   @unique
-  name    String?
-  homes   Home[]   @relation("UserHomes")
+    id           String       @id @unique @default(uuid())
+    email        String       @unique
+    name         String?
+    password     String
+    error_logins ErrorLogin[]
+    homes        Home[]       @relation("UserHomes")
+    createdAt    DateTime     @default(now())
+    updatedAt    DateTime     @updatedAt
+}
+
+model ErrorLogin {
+    id       String   @id @unique @default(uuid())
+    user_id  String
+    user     User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+    date_try DateTime @default(now())
 }
 
 model Home {
-  id        String   @id @default(uuid())
-  name      String
-  members   User[]   @relation("UserHomes")
-  lists     List[]
+    id      String @id @default(uuid())
+    name    String
+    members User[] @relation("UserHomes")
+    lists   List[]
 }
 
 model List {
-  id       String   @id @default(uuid())
-  title    String
-  homeId   String
-  home     Home     @relation(fields: [homeId], references: [id])
-  items    Item[]
+    id     String @id @default(uuid())
+    title  String
+    homeId String
+    home   Home   @relation(fields: [homeId], references: [id])
+    items  Item[]
 }
 
 model Item {
-  id       String   @id @default(uuid())
-  name     String
-  checked  Boolean  @default(false)
-  listId   String
-  list     List     @relation(fields: [listId], references: [id])
+    id      String  @id @default(uuid())
+    name    String
+    checked Boolean @default(false)
+    listId  String
+    list    List    @relation(fields: [listId], references: [id])
 }
