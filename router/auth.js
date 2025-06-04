@@ -5,8 +5,12 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { DateTime } = require("luxon");
 const authMiddleware = require("../middleware/auth.middleware");
+const transporter = require("../config/nodemailer");
+require("dotenv").config();
 
-router.post("/register", async (req, res) => {
+const register = process.env.URL_REGISTER;
+
+router.post(register, async (req, res) => {
   const { name, email, emailConfirm, password, passwordConfirm } = req.body;
 
   if (!email || !emailConfirm || !password || !name || !passwordConfirm) {
@@ -15,15 +19,15 @@ router.post("/register", async (req, res) => {
     });
   }
 
-  if(email !== emailConfirm){
+  if (email !== emailConfirm) {
     return res.status(400).json({
-        message: "Los Emails no son iguales",
-      });
+      message: "Los Emails no son iguales",
+    });
   }
-  if(password !== passwordConfirm){
+  if (password !== passwordConfirm) {
     return res.status(400).json({
-        message: "Las Contraseñas no son iguales",
-      });
+      message: "Las Contraseñas no son iguales",
+    });
   }
 
   const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{7,}$/;
@@ -69,13 +73,9 @@ router.post("/register", async (req, res) => {
       },
     });
 
-    const token = jwt.sign(
-      { id: user.id, email },
-      process.env.JWT_SECRET,
-      {
-        expiresIn: "30d",
-      }
-    );
+    const token = jwt.sign({ id: user.id, email }, process.env.JWT_SECRET, {
+      expiresIn: "30d",
+    });
 
     res.json({ message: "Usuario registrado correctamente", token });
   } catch (error) {
@@ -154,7 +154,9 @@ router.post("/login", async (req, res) => {
 });
 
 router.post("/logout", authMiddleware, (req, res) => {
-  res.json({ message: "Cierre de sessión exitoso. Se ha borrado el token del cliente." });
+  res.json({
+    message: "Cierre de sessión exitoso. Se ha borrado el token del cliente.",
+  });
 });
 
 router.get("/me", authMiddleware, async (req, res) => {
@@ -171,7 +173,7 @@ router.get("/me", authMiddleware, async (req, res) => {
     });
 
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      return res.status(404).json({ message: "Usuario no encontrado" });
     }
 
     res.json({ loggedIn: true, user });
@@ -180,5 +182,133 @@ router.get("/me", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Error retrieving user" });
   }
 });
+
+router.post("/forgot-password", async (req, res) => {
+  const { email } = req.body;
+  const ahora = DateTime.now().setZone("Europe/Madrid");
+  const en30Min = ahora.plus({ minutes: 30 });
+  const formatoISO = en30Min.toISO();
+
+  try {
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+    const token = jwt.sign({ user_id: user.id }, process.env.JWT_SECRET, {
+      expiresIn: "30m",
+    });
+
+    await prisma.oneTimeToken.create({
+      data: {
+        token,
+        purpose: "reset-password",
+        user_id: user.id,
+        expiresAt: formatoISO,
+      },
+    });
+
+    const link = `${process.env.URL}reset-password?token=${token}`;
+
+    const mailOptions = {
+      from: '"NotApp" <no-reply@notapp.com>',
+      to: email,
+      subject: "Restablecer contraseña",
+      html: `<p>Haz clic aquí para restablecer tu contraseña:</p><a href="${link}">${link}</a>`,
+    };
+
+    transporter.sendMail(mailOptions, (error, info) => {
+      if (error) {
+        console.error("Error sending email: ", error);
+      } else {
+        console.log("Email sent: ", info.response);
+      }
+    });
+    console.log("Mail Enviado");
+
+    res.json({ message: "Correo de recuperación enviado" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+router.post("/reset-password/:token", async (req, res) => {
+  const { password, passwordConfirm } = req.body;
+  const { token } = req.params;
+
+  if (!password || !passwordConfirm) {
+    return res.status(400).json({
+      message: "Faltan datos",
+    });
+  }
+
+  const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{7,}$/;
+  const passwordClean = password.trim();
+  const passwordConfirmClean = passwordConfirm.trim();
+
+  try {
+    if (passwordClean !== passwordConfirmClean) {
+      return res.status(400).json({
+        message: "Las Contraseñas no son iguales",
+      });
+    }
+
+    if (!passwordRegex.test(passwordClean)) {
+      return res.status(400).json({
+        message:
+          "La contraseña debe tener al menos 7 caracteres, una mayúscula, un número y un carácter especial",
+      });
+    }
+
+    const tokenValidate = await prisma.oneTimeToken.findUnique({
+      where: { token },
+    });
+
+    if (tokenValidate.used || tokenValidate.expiresAt < Date.now()) {
+      return res.status(400).json({ message: "Token invalido" });
+    }
+
+    await prisma.oneTimeToken.update({
+      where: { id: tokenValidate.id },
+      data: { used: true },
+    });
+
+    const hashedPassword = await bcrypt.hash(passwordClean, 10);
+
+    await prisma.user.update({
+      where: { id: tokenValidate.user_id },
+      data: { password: hashedPassword },
+    });
+
+    res.json({ message: "Contraseña actualizada correctamente" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+router.get("/check-token/:token", async (req, res) => {
+    const { token } = req.params;
+
+    try {
+  
+      const tokenValidate = await prisma.oneTimeToken.findUnique({
+        where: { token },
+      });
+
+      if (!tokenValidate) {
+        return res.status(400).json({ message: "El token no existe" });
+      }
+  
+      if (tokenValidate.used || tokenValidate.expiresAt < Date.now()) {
+        return res.status(400).json({ message: "Token invalido" });
+      }
+  
+      res.json({ message: "Token valido" });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ message: "Server error" });
+    }
+  });
 
 module.exports = router;

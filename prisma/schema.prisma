@@ -7,43 +7,107 @@ datasource db {
     url      = env("DATABASE_URL")
 }
 
+enum ROLE {
+    OWNER
+    ADMIN
+    MEMBER
+}
+
+enum CATEGORY {
+    LACTEOS
+    CARNE
+    PERCADO
+}
+
 model User {
-    id           String       @id @unique @default(uuid())
-    email        String       @unique
-    name         String?
-    password     String
-    error_logins ErrorLogin[]
-    homes        Home[]       @relation("UserHomes")
-    createdAt    DateTime     @default(now())
-    updatedAt    DateTime     @updatedAt
+    id            String         @id @default(uuid())
+    email         String         @unique
+    name          String?
+    password      String
+    image         String?
+    error_logins  ErrorLogin[]
+    members       Member[]
+    invitations   Invitation[]
+    oneTimeTokens OneTimeToken[]
+    createdAt     DateTime       @default(now())
+    updatedAt     DateTime       @updatedAt
+}
+
+model Member {
+    id      String @id @default(uuid())
+    user_id String
+    home_id String
+    role    ROLE
+    user    User   @relation(fields: [user_id], references: [id], onDelete: Cascade)
+    home    Home   @relation(fields: [home_id], references: [id], onDelete: Cascade)
+}
+
+model Invitation {
+    id      String @id @default(uuid())
+    user_id String
+    home_id String
+    user    User   @relation(fields: [user_id], references: [id], onDelete: Cascade)
+    home    Home   @relation(fields: [home_id], references: [id], onDelete: Cascade)
 }
 
 model ErrorLogin {
-    id       String   @id @unique @default(uuid())
+    id       String   @id @default(uuid())
     user_id  String
     user     User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
     date_try DateTime @default(now())
 }
 
 model Home {
-    id      String @id @default(uuid())
-    name    String
-    members User[] @relation("UserHomes")
-    lists   List[]
+    id          String       @id @default(uuid())
+    name        String
+    image       String?
+    members     Member[]
+    invitations Invitation[]
+    lists       List[]
+    items       Item[]
+    createdAt   DateTime     @default(now())
+    updatedAt   DateTime     @updatedAt
 }
 
 model List {
-    id     String @id @default(uuid())
-    title  String
-    homeId String
-    home   Home   @relation(fields: [homeId], references: [id])
-    items  Item[]
+    id        String     @id @default(uuid())
+    title     String
+    home_id   String
+    fav       Boolean    @default(false)
+    listCheck Boolean    @default(false)
+    itemsList ItemList[]
+    home      Home       @relation(fields: [home_id], references: [id], onDelete: Restrict)
+}
+
+model ItemList {
+    id      String @id @default(uuid())
+    item_id String
+    list_id String
+    list    List   @relation(fields: [list_id], references: [id], onDelete: Cascade)
+    item    Item   @relation(fields: [item_id], references: [id], onDelete: Cascade)
+
+    @@unique([item_id, list_id])
 }
 
 model Item {
-    id      String  @id @default(uuid())
-    name    String
-    checked Boolean @default(false)
-    listId  String
-    list    List    @relation(fields: [listId], references: [id])
+    id          String     @id @default(uuid())
+    name        String
+    home_id     String
+    image       String?
+    price       String?
+    description String?
+    categories  CATEGORY[]
+    itemsList   ItemList[]
+    home        Home       @relation(fields: [home_id], references: [id], onDelete: Restrict)
+}
+
+model OneTimeToken {
+    id        String   @id @default(uuid())
+    token     String   @unique
+    purpose   String 
+    user_id   String
+    user      User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+    used      Boolean  @default(false)
+    expiresAt DateTime
+    createdAt DateTime @default(now())
 }

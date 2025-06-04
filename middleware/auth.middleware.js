@@ -5,8 +5,6 @@ const authMiddleware = (req, res, next) => {
     const token = req.headers.authorization?.split(" ")[1];
     const apiKey = req.header("x-api-key");
 
-    console.log(apiKey)
-
     if (apiKey && apiKey === process.env.VITE_API_KEY) {
       return next();
     }
