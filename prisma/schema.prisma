@@ -14,9 +14,18 @@ enum ROLE {
 }
 
 enum CATEGORY {
+    FRUTAS_VERDURAS
     LACTEOS
     CARNE
-    PERCADO
+    PESCADO
+    BEBIDAS
+    PANADERIA
+    DULCES
+    CONGELADOS
+    HIGIENE
+    LIMPIEZA
+    MASCOTAS
+    OTROS
 }
 
 model User {
@@ -104,7 +113,7 @@ model Item {
 model OneTimeToken {
     id        String   @id @default(uuid())
     token     String   @unique
-    purpose   String 
+    purpose   String
     user_id   String
     user      User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
     used      Boolean  @default(false)
