@@ -85,7 +85,9 @@ model List {
     fav       Boolean    @default(false)
     listCheck Boolean    @default(false)
     itemsList ItemList[]
-    home      Home       @relation(fields: [home_id], references: [id], onDelete: Restrict)
+    home      Home       @relation(fields: [home_id], references: [id], onDelete: Cascade)
+    createdAt DateTime?   @default(now())
+    updatedAt DateTime?   @updatedAt
 }
 
 model ItemList {
@@ -96,6 +98,8 @@ model ItemList {
     item    Item   @relation(fields: [item_id], references: [id], onDelete: Cascade)
 
     @@unique([item_id, list_id])
+    createdAt   DateTime?     @default(now())
+    updatedAt   DateTime?     @updatedAt
 }
 
 model Item {
@@ -107,15 +111,17 @@ model Item {
     description String?
     categories  CATEGORY[]
     itemsList   ItemList[]
-    home        Home       @relation(fields: [home_id], references: [id], onDelete: Restrict)
+    home        Home       @relation(fields: [home_id], references: [id], onDelete: Cascade)
+    createdAt   DateTime?     @default(now())
+    updatedAt   DateTime?     @updatedAt
 }
 
 model OneTimeToken {
     id        String   @id @default(uuid())
     token     String   @unique
     purpose   String
-    user_id   String
-    user      User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+    user_id   String?
+    user      User?    @relation(fields: [user_id], references: [id], onDelete: Cascade)
     used      Boolean  @default(false)
     expiresAt DateTime
     createdAt DateTime @default(now())

@@ -17,12 +17,17 @@ router.post(
       if (!user_id || !name) {
         return res.status(400).json({ message: "Faltan datos" });
       }
-      const result = await cloudinary.uploader.upload(req.file.path);
+      const image = [];
+
+      if (req.file?.path) {
+        const result = await cloudinary.uploader.upload(req.file.path);
+        image.push(result);
+      }
 
       await prisma.home.create({
         data: {
           name: name,
-          image: result.public_id ? result.public_id : null,
+          image: image[0]?.public_id ? image[0]?.public_id : null,
           members: {
             create: {
               user_id: user_id,
@@ -75,7 +80,11 @@ router.get("/:id", authMiddleware, async (req, res) => {
       include: {
         members: true,
         lists: true,
-        items: true,
+        items: {
+          orderBy: {
+            updatedAt: "desc"
+          }
+        },
       },
     });
     res.send(hogar);

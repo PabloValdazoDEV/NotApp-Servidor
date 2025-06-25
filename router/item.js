@@ -12,9 +12,6 @@ router.post(
   upload.single("file"),
   async (req, res) => {
     const { hogar_id, name, price, description, categories } = req.body;
-    if (req.file) {
-      console.log(req.file.path);
-    }
     try {
       if (!hogar_id || !name) {
         return res.status(400).json({ message: "Faltan datos" });
