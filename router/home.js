@@ -78,7 +78,11 @@ router.get("/:id", authMiddleware, async (req, res) => {
     const hogar = await prisma.home.findUnique({
       where: { id },
       include: {
-        members: true,
+        members: {
+          include:{
+            user:true
+          }
+        },
         lists: true,
         items: {
           orderBy: {
@@ -128,7 +132,7 @@ router.post(
         },
         data: {
           name: cleanedName ? cleanedName : hogar.name,
-          image: image[0].public_id ? image[0].public_id : null,
+          image: image[0]?.public_id ? image[0].public_id : null,
         },
       });
 

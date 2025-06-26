@@ -279,4 +279,80 @@ router.post("/invite/:id_hogar", authMiddleware, async (req, res) => {
   }
 });
 
+router.delete("/delete/:id_member", authMiddleware, async (req, res) => {
+  const { id_member } = req.params;
+  try {
+    if (!id_member) {
+      return res.status(400).json({
+        message: "Faltan datos",
+      });
+    }
+
+    const miembro = await prisma.member.findUnique({
+      where: {
+        id: id_member,
+      },
+    });
+
+    if (!miembro) {
+      return res.status(400).json({
+        message: "Miembro no encontrada.",
+      });
+    }
+
+    await prisma.member.delete({
+      where: {
+        id: id_member,
+      },
+    });
+
+    res.json({
+      message: "El miembro se ha eliminado correctamente",
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+router.post("/edit/:id_member", authMiddleware, async (req, res) => {
+  const { id_member } = req.params;
+  const { role } = req.body;
+  try {
+    if (!id_member || !role) {
+      return res.status(400).json({
+        message: "Faltan datos",
+      });
+    }
+
+    const miembro = await prisma.member.findUnique({
+      where: {
+        id: id_member,
+      },
+    });
+
+    if (!miembro) {
+      return res.status(400).json({
+        message: "Miembro no encontrada.",
+      });
+    }
+
+    await prisma.member.update({
+      where: {
+        id: id_member,
+      },
+      data:{
+        role
+      }
+    });
+
+    res.json({
+      message: "El miembro se ha eliminado correctamente",
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 module.exports = router;
