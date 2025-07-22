@@ -79,15 +79,15 @@ router.get("/:id", authMiddleware, async (req, res) => {
       where: { id },
       include: {
         members: {
-          include:{
-            user:true
-          }
+          include: {
+            user: true,
+          },
         },
         lists: true,
         items: {
           orderBy: {
-            updatedAt: "desc"
-          }
+            updatedAt: "desc",
+          },
         },
       },
     });
@@ -156,8 +156,8 @@ router.delete("/:hogar_id", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "El hogar no existe" });
     }
 
-    if(hogar.image){
-        cloudinary.uploader.destroy(hogar.image);
+    if (hogar.image) {
+      cloudinary.uploader.destroy(hogar.image);
     }
     await prisma.home.delete({ where: { id: hogar_id } });
     res.json({ message: "Hogar borrado correctamentename" });

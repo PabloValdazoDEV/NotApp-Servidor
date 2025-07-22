@@ -169,7 +169,8 @@ router.get("/me", authMiddleware, async (req, res) => {
         email: true,
         name: true,
         id: true,
-        image:true
+        image:true,
+        invitations:true
       },
     });
 

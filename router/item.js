@@ -54,6 +54,7 @@ router.post(
   upload.single("file"),
   async (req, res) => {
     const { name, price, description, categories } = req.body;
+    const categoriesFilter = categories?.filter(category => category !== '0')
     const { item_id } = req.params;
     try {
       if (!item_id || !name) {
@@ -86,7 +87,7 @@ router.post(
           image: image[0]?.public_id ? image[0]?.public_id : null,
           description,
           price,
-          categories,
+          categories: categoriesFilter,
         },
       });
       res.json({ message: "Item actualizado correctamente", item: data });
@@ -119,5 +120,54 @@ router.delete("/:item_id", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
+router.get("/params/:id_home", authMiddleware, async (req, res) => {
+  const { element, page, name, category } = req.query;
+  const { id_home } = req.params;
+  const salto = 10 * (page - 1);
+  try {
+    if (!page && !element && !id_home) {
+      return res.status(400).json({ message: "Faltan datos" });
+    }
+    const home = await prisma.home.findUnique({ where: { id: id_home } });
+
+    if (!home) {
+      return res.status(400).json({ message: "No existe ese hogar" });
+    }
+    const items = await prisma.item.findMany({
+      where: {
+        home_id: id_home,
+        AND: [
+          name
+            ? {
+                name: {
+                  contains: name,
+                  mode: "insensitive",
+                },
+              }
+            : {},
+          category
+            ? {
+                categories: {
+                  has: category,
+                },
+              }
+            : {},
+        ],
+      },
+      orderBy: {
+        name: "asc",
+      },
+      skip: salto,
+      take: 10,
+    });
+
+    return res.json(items);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 
 module.exports = router;
