@@ -53,8 +53,8 @@ router.post(
   authMiddleware,
   upload.single("file"),
   async (req, res) => {
-    const { name, price, description, categories } = req.body;
-    const categoriesFilter = categories?.filter(category => category !== '0')
+    const { name, price, description, categories, imageDelete } = req.body;
+    const categoriesFilter = categories?.filter((category) => category !== "0");
     const { item_id } = req.params;
     try {
       if (!item_id || !name) {
@@ -68,14 +68,20 @@ router.post(
 
       const image = [];
 
-      if (req.file?.path) {
+      if (imageDelete === "true") {
         if (item.image) {
           cloudinary.uploader.destroy(item.image);
         }
-        const result = await cloudinary.uploader.upload(req.file.path);
-        image.push(result);
-      }else if(item.image){
-        image.push({public_id: item.image});
+      } else {
+        if (req.file?.path) {
+          if (item.image) {
+            cloudinary.uploader.destroy(item.image);
+          }
+          const result = await cloudinary.uploader.upload(req.file.path);
+          image.push(result);
+        } else if (item.image) {
+          image.push({ public_id: item.image });
+        }
       }
 
       const cleanedName = name?.trim();
@@ -84,7 +90,7 @@ router.post(
         where: { id: item_id },
         data: {
           name: cleanedName,
-          image: image[0]?.public_id ? image[0]?.public_id : null,
+          image: image[0]?.public_id || null,
           description,
           price,
           categories: categoriesFilter,
@@ -168,6 +174,5 @@ router.get("/params/:id_home", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
 
 module.exports = router;
