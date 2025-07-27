@@ -104,7 +104,7 @@ router.post(
   upload.single("file"),
   async (req, res) => {
     const { hogar_id } = req.params;
-    const { name } = req.body;
+    const { name, imageDelete } = req.body;
     try {
       if (!hogar_id) {
         return res.status(400).json({ message: "Faltan datos" });
@@ -116,12 +116,20 @@ router.post(
       }
       const image = [];
 
-      if (req.file?.path) {
+      if (imageDelete === "true") {
         if (hogar.image) {
           cloudinary.uploader.destroy(hogar.image);
         }
-        const result = await cloudinary.uploader.upload(req.file.path);
-        image.push(result);
+      } else {
+        if (req.file?.path) {
+          if (hogar.image) {
+            cloudinary.uploader.destroy(hogar.image);
+          }
+          const result = await cloudinary.uploader.upload(req.file.path);
+          image.push(result);
+        } else if (hogar.image) {
+          image.push({ public_id: hogar.image });
+        }
       }
 
       const cleanedName = name?.trim();
