@@ -58,7 +58,7 @@ router.get("/user-home/:user_id", authMiddleware, async (req, res) => {
     }
     const data = await prisma.home.findMany({
       where: { members: { some: { user_id } } },
-      orderBy: { updatedAt: "desc" },
+      orderBy: { name: "asc" },
     });
 
     res.send(data);
@@ -86,7 +86,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
         lists: true,
         items: {
           orderBy: {
-            updatedAt: "desc",
+            name: "asc",
           },
         },
       },

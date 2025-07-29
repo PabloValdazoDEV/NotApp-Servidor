@@ -86,20 +86,22 @@ model List {
     listCheck Boolean    @default(false)
     itemsList ItemList[]
     home      Home       @relation(fields: [home_id], references: [id], onDelete: Cascade)
-    createdAt DateTime?   @default(now())
-    updatedAt DateTime?   @updatedAt
+    createdAt DateTime?  @default(now())
+    updatedAt DateTime?  @updatedAt
 }
 
 model ItemList {
-    id      String @id @default(uuid())
-    item_id String
-    list_id String
-    list    List   @relation(fields: [list_id], references: [id], onDelete: Cascade)
-    item    Item   @relation(fields: [item_id], references: [id], onDelete: Cascade)
+    id         String    @id @default(uuid())
+    item_id    String
+    list_id    String
+    quantity   Int       @default(1)
+    check_take Boolean   @default(false)
+    list       List      @relation(fields: [list_id], references: [id], onDelete: Cascade)
+    item       Item      @relation(fields: [item_id], references: [id], onDelete: Cascade)
+    createdAt  DateTime? @default(now())
+    updatedAt  DateTime? @updatedAt
 
     @@unique([item_id, list_id])
-    createdAt   DateTime?     @default(now())
-    updatedAt   DateTime?     @updatedAt
 }
 
 model Item {
@@ -112,8 +114,8 @@ model Item {
     categories  CATEGORY[]
     itemsList   ItemList[]
     home        Home       @relation(fields: [home_id], references: [id], onDelete: Cascade)
-    createdAt   DateTime?     @default(now())
-    updatedAt   DateTime?     @updatedAt
+    createdAt   DateTime?  @default(now())
+    updatedAt   DateTime?  @updatedAt
 }
 
 model OneTimeToken {
