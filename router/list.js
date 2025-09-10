@@ -8,6 +8,7 @@ const cloudinary = require("cloudinary").v2;
 
 router.post("/create-list", authMiddleware, async (req, res) => {
   const { title, id_home } = req.body;
+  // console.log(req.body)
   const titleClean = title.trim();
   try {
     if (!id_home || !titleClean) {
@@ -27,9 +28,7 @@ router.post("/create-list", authMiddleware, async (req, res) => {
       },
     });
 
-    res.json({
-      message: "Lista creada correctamente",
-    });
+    res.json({ message: "Lista creada correctamente", list: data });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -100,61 +99,73 @@ router.post("/update-list/:id_list", authMiddleware, async (req, res) => {
   }
 });
 
-router.post("/update-itemlist/:id_itemList", authMiddleware, async (req, res) => {
-  const { id_itemList } = req.params;
-  const { quantity } = req.body;
-  try {
-    if (!id_itemList) {
-      return res.status(400).json({ message: "Faltan datos" });
-    }
-
-    const itemList = await prisma.itemList.findUnique({ where: { id: id_itemList } });
-
-    if (!itemList) {
-      return res.status(400).json({ message: "El producto no existe" });
-    }
-    await prisma.itemList.update({
-      where: {
-        id: id_itemList,
-      },
-      data: {
-        quantity: +quantity,
-      },
-    });
-    res.json({
-      message: "Producto actualizado correctamente",
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
-router.delete("/delete-itemlist/:id_itemList", authMiddleware, async (req, res) => {
-  const { id_itemList } = req.params;
-  try {
-    if (!id_itemList) {
-      return res.status(400).json({ message: "Faltan datos" });
-    }
-
-    const itemList = await prisma.itemList.findUnique({ where: { id: id_itemList } });
-
-    if (!itemList) {
-      return res.status(400).json({ message: "El producto no existe" });
-    }
-    await prisma.itemList.delete({
-      where: {
-        id: id_itemList,
+router.post(
+  "/update-itemlist/:id_itemList",
+  authMiddleware,
+  async (req, res) => {
+    const { id_itemList } = req.params;
+    const { quantity } = req.body;
+    try {
+      if (!id_itemList) {
+        return res.status(400).json({ message: "Faltan datos" });
       }
-    });
-    res.json({
-      message: "Producto eliminado correctamente",
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Server error" });
+
+      const itemList = await prisma.itemList.findUnique({
+        where: { id: id_itemList },
+      });
+
+      if (!itemList) {
+        return res.status(400).json({ message: "El producto no existe" });
+      }
+      await prisma.itemList.update({
+        where: {
+          id: id_itemList,
+        },
+        data: {
+          quantity: +quantity,
+        },
+      });
+      res.json({
+        message: "Producto actualizado correctamente",
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ message: "Server error" });
+    }
   }
-});
+);
+
+router.delete(
+  "/delete-itemlist/:id_itemList",
+  authMiddleware,
+  async (req, res) => {
+    const { id_itemList } = req.params;
+    try {
+      if (!id_itemList) {
+        return res.status(400).json({ message: "Faltan datos" });
+      }
+
+      const itemList = await prisma.itemList.findUnique({
+        where: { id: id_itemList },
+      });
+
+      if (!itemList) {
+        return res.status(400).json({ message: "El producto no existe" });
+      }
+      await prisma.itemList.delete({
+        where: {
+          id: id_itemList,
+        },
+      });
+      res.json({
+        message: "Producto eliminado correctamente",
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
 
 router.delete("/delete-list/:id_list", authMiddleware, async (req, res) => {
   const { id_list } = req.params;
@@ -171,11 +182,47 @@ router.delete("/delete-list/:id_list", authMiddleware, async (req, res) => {
     await prisma.list.delete({
       where: {
         id: id_list,
-      }
+      },
     });
     res.json({
       message: "Lista eliminada correctamente",
     });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+router.get("/params/:id_home", authMiddleware, async (req, res) => {
+  const { page, title } = req.query;
+  const { id_home } = req.params;
+  const salto = 10 * (page - 1);
+  try {
+    if (!page && !element && !id_home) {
+      return res.status(400).json({ message: "Faltan datos" });
+    }
+    const home = await prisma.home.findUnique({ where: { id: id_home } });
+
+    if (!home) {
+      return res.status(400).json({ message: "No existe ese hogar" });
+    }
+
+    const lists = await prisma.list.findMany({
+      where: {
+        home_id: id_home,
+        title: {
+            contains: title,
+            mode: "insensitive",
+        },
+      },
+      orderBy: {
+        title: "asc",
+      },
+      skip: salto,
+      take: 10,
+    });
+
+    return res.json(lists);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -203,7 +250,7 @@ router.get("/home/:id_home", authMiddleware, async (req, res) => {
             fav: true,
             listCheck: true,
             itemsList: true,
-            id:true
+            id: true,
           },
         },
       },
@@ -231,13 +278,13 @@ router.get("/:id_list", authMiddleware, async (req, res) => {
     const list = await prisma.itemList.findMany({
       where: { list_id: id_list },
       orderBy: {
-        item: {name: "asc"},
+        item: { name: "asc" },
       },
       select: {
         quantity: true,
         item: true,
         check_take: true,
-        id: true
+        id: true,
       },
     });
 

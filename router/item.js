@@ -140,6 +140,7 @@ router.get("/params/:id_home", authMiddleware, async (req, res) => {
     if (!home) {
       return res.status(400).json({ message: "No existe ese hogar" });
     }
+
     const items = await prisma.item.findMany({
       where: {
         home_id: id_home,
