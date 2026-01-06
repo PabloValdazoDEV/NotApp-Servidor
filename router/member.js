@@ -347,7 +347,7 @@ router.post("/edit/:id_member", authMiddleware, async (req, res) => {
     });
 
     res.json({
-      message: "El miembro se ha eliminado correctamente",
+      message: "El miembro se ha editado correctamente",
     });
   } catch (error) {
     console.error(error);

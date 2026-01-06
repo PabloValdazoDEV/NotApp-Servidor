@@ -57,6 +57,7 @@ model Invitation {
     home_id String
     user    User   @relation(fields: [user_id], references: [id], onDelete: Cascade)
     home    Home   @relation(fields: [home_id], references: [id], onDelete: Cascade)
+    createdAt   DateTime     @default(now())
 }
 
 model ErrorLogin {

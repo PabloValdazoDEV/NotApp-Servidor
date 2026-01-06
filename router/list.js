@@ -38,8 +38,6 @@ router.post("/create-list", authMiddleware, async (req, res) => {
 router.post("/add-item/:id_list", authMiddleware, async (req, res) => {
   const { id_item, quantity } = req.body;
   const { id_list } = req.params;
-  // console.log(id_item)
-  // console.log(id_list)
   try {
     if (!id_list || !id_item) {
       return res.status(400).json({ message: "Faltan datos" });
@@ -193,12 +191,55 @@ router.delete("/delete-list/:id_list", authMiddleware, async (req, res) => {
   }
 });
 
+router.get("/params/items/:id_list", authMiddleware, async (req, res) => {
+  const { page, name } = req.query;
+  const { id_list } = req.params;
+  const salto = 10 * (page - 1);
+  try {
+    if (!page && !id_list) {
+      return res.status(400).json({ message: "Faltan datos" });
+    }
+    const list = await prisma.list.findUnique({ where: { id: id_list } });
+
+    if (!list) {
+      return res.status(400).json({ message: "No existe ese hogar" });
+    }
+
+    const items = await prisma.itemList.findMany({
+      where: {
+        list_id: id_list,
+        item:{
+          name: {
+          contains: name,
+          mode: "insensitive",
+        },
+        }
+      },
+      include: {
+        item: true
+      },
+      orderBy: {
+        item: {
+          name: "asc",
+        },
+      },
+      skip: salto,
+      take: 10,
+    });
+
+    return res.json(items);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 router.get("/params/:id_home", authMiddleware, async (req, res) => {
   const { page, title } = req.query;
   const { id_home } = req.params;
   const salto = 10 * (page - 1);
   try {
-    if (!page && !element && !id_home) {
+    if (!page && !id_home) {
       return res.status(400).json({ message: "Faltan datos" });
     }
     const home = await prisma.home.findUnique({ where: { id: id_home } });
@@ -211,8 +252,8 @@ router.get("/params/:id_home", authMiddleware, async (req, res) => {
       where: {
         home_id: id_home,
         title: {
-            contains: title,
-            mode: "insensitive",
+          contains: title,
+          mode: "insensitive",
         },
       },
       orderBy: {
@@ -221,6 +262,7 @@ router.get("/params/:id_home", authMiddleware, async (req, res) => {
       skip: salto,
       take: 10,
     });
+    // console.log(lists);
 
     return res.json(lists);
   } catch (error) {
@@ -268,11 +310,31 @@ router.get("/home/:id_home", authMiddleware, async (req, res) => {
 
 // Ver todos los porductos y sus datos de una lista
 
-router.get("/:id_list", authMiddleware, async (req, res) => {
-  const { id_list } = req.params;
+router.get("/:id_home/:id_list", authMiddleware, async (req, res) => {
+  const { id_list, id_home } = req.params;
   try {
-    if (!id_list) {
+    if (!id_list || !id_home) {
       return res.status(400).json({ message: "Faltan datos" });
+    }
+
+    const exist = await prisma.home.findFirst({
+      where: {
+        id: id_home,
+        lists: {
+          some: { id: id_list },
+        },
+      },
+      select: {
+        lists: {
+          where: {
+            id: id_list,
+          },
+        },
+      },
+    });
+
+    if (exist === null) {
+      return res.status(400).json({ message: "Error al busca la lista." });
     }
 
     const list = await prisma.itemList.findMany({
@@ -287,7 +349,6 @@ router.get("/:id_list", authMiddleware, async (req, res) => {
         id: true,
       },
     });
-
     if (list.length === 0) {
       return res.status(400).json({ message: "No hay productos en la lista" });
     }

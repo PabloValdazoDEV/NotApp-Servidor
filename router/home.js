@@ -58,9 +58,11 @@ router.get("/user-home/:user_id", authMiddleware, async (req, res) => {
     }
     const data = await prisma.home.findMany({
       where: { members: { some: { user_id } } },
+      include: {
+        members: true,
+      },
       orderBy: { name: "asc" },
     });
-
     res.send(data);
   } catch (error) {
     console.error(error);
@@ -90,6 +92,11 @@ router.get("/:id", authMiddleware, async (req, res) => {
           },
         },
       },
+    });
+    const roleOrder = { OWNER: 0, ADMIN: 1, MEMBER: 2 };
+
+    hogar.members.sort((a, b) => {
+      return roleOrder[a.role] - roleOrder[b.role];
     });
     res.send(hogar);
   } catch (error) {

@@ -23,7 +23,11 @@ router.get("/:id_user", authMiddleware, async (req, res) => {
         name: true,
         email: true,
         image: true,
-        invitations: true,
+        invitations: {
+          orderBy:{
+            createdAt: "desc"
+          }
+        },
       },
     });
     if (user === null) {
@@ -47,7 +51,7 @@ router.post(
   upload.single("file"),
   async (req, res) => {
     const { id_user } = req.params;
-    const { name, email } = req.body;
+    const { name, email, imageDelete } = req.body;
     try {
       if (!id_user) {
         return res.status(400).json({
@@ -56,7 +60,7 @@ router.post(
       }
       const user = await prisma.user.findUnique({
         where: {
-          id: id_user
+          id: id_user,
         },
       });
       if (user === null) {
@@ -67,14 +71,20 @@ router.post(
 
       const image = [];
 
-      if (req.file?.path) {
+      if (imageDelete === "true") {
         if (user.image) {
           cloudinary.uploader.destroy(user.image);
         }
-        const result = await cloudinary.uploader.upload(req.file.path);
-        image.push(result);
-      } else if (user.image) {
-        image.push({ public_id: user.image });
+      } else {
+        if (req.file?.path) {
+          if (user.image) {
+            cloudinary.uploader.destroy(user.image);
+          }
+          const result = await cloudinary.uploader.upload(req.file.path);
+          image.push(result);
+        } else if (user.image) {
+          image.push({ public_id: user.image });
+        }
       }
 
       const cleanedName = name?.trim();
