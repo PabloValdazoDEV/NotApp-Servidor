@@ -6,9 +6,68 @@ const multer = require("multer");
 const upload = multer({ dest: "uploads/" });
 const cloudinary = require("cloudinary").v2;
 
+const itemSelect = {
+  id: true,
+  name: true,
+  home_id: true,
+  image: true,
+  price: true,
+  description: true,
+  categories: true,
+  supermarket: true,
+  createdAt: true,
+  updatedAt: true,
+};
+
+const itemListSelect = {
+  id: true,
+  item_id: true,
+  list_id: true,
+  quantity: true,
+  check_take: true,
+  status: true,
+  updatedAt: true,
+  item: {
+    select: itemSelect,
+  },
+};
+
+const itemListStatsSelect = {
+  id: true,
+  item_id: true,
+  list_id: true,
+  quantity: true,
+  check_take: true,
+  status: true,
+};
+
+const itemListStatuses = ["PENDING", "FOUND", "NOT_FOUND"];
+
+const emitToList = (req, listId, event, payload) => {
+  const io = req.app.get("io");
+  if (!io || !listId) return;
+  io.to(`list:${listId}`).emit(event, payload);
+};
+
+const parseBoolean = (value) => {
+  if (typeof value === "boolean") return value;
+  if (value === "1") return true;
+  if (value === "0") return false;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return Boolean(value);
+};
+
+const statusFromCheckTake = (checkTake) => (checkTake ? "FOUND" : "PENDING");
+
+const normalizeStatus = (status) => {
+  if (typeof status !== "string") return null;
+  const normalizedStatus = status.toUpperCase();
+  return itemListStatuses.includes(normalizedStatus) ? normalizedStatus : null;
+};
+
 router.post("/create-list", authMiddleware, async (req, res) => {
   const { title, id_home } = req.body;
-  // console.log(req.body)
   const titleClean = title.trim();
   try {
     if (!id_home || !titleClean) {
@@ -35,8 +94,87 @@ router.post("/create-list", authMiddleware, async (req, res) => {
   }
 });
 
+router.post(
+  "/create-from-not-found/:id_list",
+  authMiddleware,
+  async (req, res) => {
+    const { id_list } = req.params;
+    const { title, clientMutationId } = req.body;
+    const titleClean = title?.trim();
+
+    try {
+      if (!id_list || !titleClean) {
+        return res.status(400).json({ message: "Faltan datos" });
+      }
+
+      const sourceList = await prisma.list.findUnique({
+        where: { id: id_list },
+        select: {
+          id: true,
+          home_id: true,
+        },
+      });
+
+      if (!sourceList) {
+        return res.status(400).json({ message: "La lista origen no existe" });
+      }
+
+      const notFoundItems = await prisma.itemList.findMany({
+        where: {
+          list_id: id_list,
+          status: "NOT_FOUND",
+        },
+        select: {
+          item_id: true,
+          quantity: true,
+        },
+      });
+
+      if (notFoundItems.length === 0) {
+        return res.status(400).json({
+          message: "No hay productos no encontrados para crear una lista",
+        });
+      }
+
+      const list = await prisma.list.create({
+        data: {
+          title: titleClean,
+          home_id: sourceList.home_id,
+          itemsList: {
+            create: notFoundItems.map((itemList) => ({
+              item_id: itemList.item_id,
+              quantity: itemList.quantity,
+              check_take: false,
+              status: "PENDING",
+            })),
+          },
+        },
+        select: {
+          id: true,
+          title: true,
+          home_id: true,
+          createdAt: true,
+          updatedAt: true,
+          itemsList: {
+            select: itemListStatsSelect,
+          },
+        },
+      });
+
+      return res.json({
+        message: "Lista creada correctamente",
+        list,
+        clientMutationId,
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
 router.post("/add-item/:id_list", authMiddleware, async (req, res) => {
-  const { id_item, quantity } = req.body;
+  const { id_item, quantity, clientMutationId } = req.body;
   const { id_list } = req.params;
   try {
     if (!id_list || !id_item) {
@@ -49,16 +187,42 @@ router.post("/add-item/:id_list", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "La lista no existe" });
     }
 
-    await prisma.itemList.create({
+    const existingItemList = await prisma.itemList.findUnique({
+      where: {
+        item_id_list_id: {
+          item_id: id_item,
+          list_id: id_list,
+        },
+      },
+      select: itemListSelect,
+    });
+
+    if (existingItemList) {
+      return res.json({
+        message: "Producto ya estaba en la lista",
+        itemList: existingItemList,
+        clientMutationId,
+      });
+    }
+
+    const itemList = await prisma.itemList.create({
       data: {
         item_id: id_item,
         list_id: id_list,
-        quantity,
+        quantity: quantity === undefined ? undefined : +quantity,
       },
+      select: itemListSelect,
+    });
+
+    emitToList(req, id_list, "itemlist:created", {
+      ...itemList,
+      clientMutationId,
     });
 
     res.json({
       message: "Producto añadido correctamente",
+      itemList,
+      clientMutationId,
     });
   } catch (error) {
     console.error(error);
@@ -102,7 +266,7 @@ router.post(
   authMiddleware,
   async (req, res) => {
     const { id_itemList } = req.params;
-    const { quantity } = req.body;
+    const { quantity, check_take, status, clientMutationId } = req.body;
     try {
       if (!id_itemList) {
         return res.status(400).json({ message: "Faltan datos" });
@@ -115,16 +279,60 @@ router.post(
       if (!itemList) {
         return res.status(400).json({ message: "El producto no existe" });
       }
-      await prisma.itemList.update({
-        where: {
-          id: id_itemList,
-        },
-        data: {
-          quantity: +quantity,
-        },
-      });
+
+      const data = {};
+      if (quantity !== undefined) {
+        const nextQuantity = +quantity;
+        if (itemList.quantity !== nextQuantity) data.quantity = nextQuantity;
+      }
+      if (check_take !== undefined) {
+        const nextCheckTake = parseBoolean(check_take);
+        if (itemList.check_take !== nextCheckTake) {
+          data.check_take = nextCheckTake;
+        }
+
+        const nextStatus = statusFromCheckTake(nextCheckTake);
+        if (itemList.status !== nextStatus) {
+          data.status = nextStatus;
+        }
+      }
+      if (status !== undefined) {
+        const nextStatus = normalizeStatus(status);
+        if (!nextStatus) {
+          return res.status(400).json({ message: "Estado no valido" });
+        }
+
+        if (itemList.status !== nextStatus) data.status = nextStatus;
+        const nextCheckTake = nextStatus === "FOUND";
+        if (itemList.check_take !== nextCheckTake) {
+          data.check_take = nextCheckTake;
+        }
+      }
+
+      const updatedItemList = Object.keys(data).length
+        ? await prisma.itemList.update({
+            where: {
+              id: id_itemList,
+            },
+            data,
+            select: itemListSelect,
+          })
+        : await prisma.itemList.findUnique({
+            where: { id: id_itemList },
+            select: itemListSelect,
+          });
+
+      if (Object.keys(data).length) {
+        emitToList(req, updatedItemList.list_id, "itemlist:updated", {
+          ...updatedItemList,
+          clientMutationId,
+        });
+      }
+
       res.json({
         message: "Producto actualizado correctamente",
+        itemList: updatedItemList,
+        clientMutationId,
       });
     } catch (error) {
       console.error(error);
@@ -138,6 +346,7 @@ router.delete(
   authMiddleware,
   async (req, res) => {
     const { id_itemList } = req.params;
+    const { clientMutationId } = req.body;
     try {
       if (!id_itemList) {
         return res.status(400).json({ message: "Faltan datos" });
@@ -148,15 +357,34 @@ router.delete(
       });
 
       if (!itemList) {
-        return res.status(400).json({ message: "El producto no existe" });
+        return res.json({
+          message: "Producto ya eliminado",
+          itemList: {
+            id: id_itemList,
+          },
+          clientMutationId,
+        });
       }
       await prisma.itemList.delete({
         where: {
           id: id_itemList,
         },
       });
+
+      const deletedItemList = {
+        id: id_itemList,
+        list_id: itemList.list_id,
+      };
+
+      emitToList(req, itemList.list_id, "itemlist:deleted", {
+        ...deletedItemList,
+        clientMutationId,
+      });
+
       res.json({
         message: "Producto eliminado correctamente",
+        itemList: deletedItemList,
+        clientMutationId,
       });
     } catch (error) {
       console.error(error);
@@ -216,7 +444,9 @@ router.get("/params/items/:id_list", authMiddleware, async (req, res) => {
         }
       },
       include: {
-        item: true
+        item: {
+          select: itemSelect,
+        },
       },
       orderBy: {
         item: {
@@ -237,7 +467,8 @@ router.get("/params/items/:id_list", authMiddleware, async (req, res) => {
 router.get("/params/:id_home", authMiddleware, async (req, res) => {
   const { page, title } = req.query;
   const { id_home } = req.params;
-  const salto = 10 * (page - 1);
+  const pageNumber = Number(page) || 1;
+  const salto = 10 * (pageNumber - 1);
   try {
     if (!page && !id_home) {
       return res.status(400).json({ message: "Faltan datos" });
@@ -251,20 +482,36 @@ router.get("/params/:id_home", authMiddleware, async (req, res) => {
     const lists = await prisma.list.findMany({
       where: {
         home_id: id_home,
-        title: {
-          contains: title,
-          mode: "insensitive",
+        ...(title
+          ? {
+              title: {
+                contains: title,
+                mode: "insensitive",
+              },
+            }
+          : {}),
+      },
+      include: {
+        itemsList: {
+          select: itemListStatsSelect,
         },
       },
-      orderBy: {
-        title: "asc",
-      },
-      skip: salto,
-      take: 10,
     });
-    // console.log(lists);
 
-    return res.json(lists);
+    const sortedLists = lists.sort((a, b) => {
+      const aHasPending = a.itemsList.some(
+        (itemList) => itemList.status === "PENDING"
+      );
+      const bHasPending = b.itemsList.some(
+        (itemList) => itemList.status === "PENDING"
+      );
+
+      if (aHasPending !== bHasPending) return aHasPending ? -1 : 1;
+
+      return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+    });
+
+    return res.json(sortedLists.slice(salto, salto + 10));
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -343,15 +590,19 @@ router.get("/:id_home/:id_list", authMiddleware, async (req, res) => {
         item: { name: "asc" },
       },
       select: {
+        item_id: true,
+        list_id: true,
         quantity: true,
-        item: true,
+        item: {
+          select: itemSelect,
+        },
         check_take: true,
+        status: true,
         id: true,
+        updatedAt: true,
       },
     });
-    if (list.length === 0) {
-      return res.status(400).json({ message: "No hay productos en la lista" });
-    }
+
     res.send(list);
   } catch (error) {
     console.error(error);

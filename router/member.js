@@ -256,11 +256,9 @@ router.post("/invite/:id_hogar", authMiddleware, async (req, res) => {
         html: `<p>Haz clic aquí para registrarte:</p><a href="${link}">${link}</a>`,
       };
 
-      transporter.sendMail(mailOptions, (error, info) => {
+      transporter.sendMail(mailOptions, (error) => {
         if (error) {
           console.error("Error sending email: ", error);
-        } else {
-          console.log("Email sent: ", info.response);
         }
       });
 

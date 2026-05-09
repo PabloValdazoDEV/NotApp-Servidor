@@ -218,14 +218,11 @@ router.post("/forgot-password", async (req, res) => {
       html: `<p>Haz clic aquí para restablecer tu contraseña:</p><a href="${link}">${link}</a>`,
     };
 
-    transporter.sendMail(mailOptions, (error, info) => {
+    transporter.sendMail(mailOptions, (error) => {
       if (error) {
         console.error("Error sending email: ", error);
-      } else {
-        console.log("Email sent: ", info.response);
       }
     });
-    console.log("Mail Enviado");
 
     res.json({ message: "Correo de recuperación enviado" });
   } catch (error) {

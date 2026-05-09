@@ -32,7 +32,8 @@
         "passport": "^0.7.0",
         "passport-local": "^1.0.0",
         "pg": "^8.13.3",
-        "prisma": "^6.8.2"
+        "prisma": "^6.8.2",
+        "socket.io": "^4.8.3"
     },
     "devDependencies": {
         "@faker-js/faker": "^9.4.0",

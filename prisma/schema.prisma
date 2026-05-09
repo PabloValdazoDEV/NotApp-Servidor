@@ -28,6 +28,25 @@ enum CATEGORY {
     OTROS
 }
 
+enum ITEM_LIST_STATUS {
+    PENDING
+    FOUND
+    NOT_FOUND
+}
+
+enum SUPERMARKET {
+    CUALQUIERA
+    MERCADONA
+    CARREFOUR
+    LIDL
+    ALDI
+    DIA
+    ALCAMPO
+    EROSKI
+    CONSUM
+    OTROS
+}
+
 model User {
     id            String         @id @default(uuid())
     email         String         @unique
@@ -97,6 +116,7 @@ model ItemList {
     list_id    String
     quantity   Int       @default(1)
     check_take Boolean   @default(false)
+    status     ITEM_LIST_STATUS @default(PENDING)
     list       List      @relation(fields: [list_id], references: [id], onDelete: Cascade)
     item       Item      @relation(fields: [item_id], references: [id], onDelete: Cascade)
     createdAt  DateTime? @default(now())
@@ -113,6 +133,7 @@ model Item {
     price       String?
     description String?
     categories  CATEGORY[]
+    supermarket SUPERMARKET @default(CUALQUIERA)
     itemsList   ItemList[]
     home        Home       @relation(fields: [home_id], references: [id], onDelete: Cascade)
     createdAt   DateTime?  @default(now())
