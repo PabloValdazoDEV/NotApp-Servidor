@@ -50,6 +50,7 @@ io.on("connection", (socket) => {
           item_id: true,
           list_id: true,
           quantity: true,
+          purchased_quantity: true,
           check_take: true,
           status: true,
           updatedAt: true,

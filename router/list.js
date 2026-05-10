@@ -24,6 +24,7 @@ const itemListSelect = {
   item_id: true,
   list_id: true,
   quantity: true,
+  purchased_quantity: true,
   check_take: true,
   status: true,
   updatedAt: true,
@@ -37,6 +38,7 @@ const itemListStatsSelect = {
   item_id: true,
   list_id: true,
   quantity: true,
+  purchased_quantity: true,
   check_take: true,
   status: true,
 };
@@ -64,6 +66,11 @@ const normalizeStatus = (status) => {
   if (typeof status !== "string") return null;
   const normalizedStatus = status.toUpperCase();
   return itemListStatuses.includes(normalizedStatus) ? normalizedStatus : null;
+};
+
+const parseNonNegativeInteger = (value) => {
+  const parsedValue = Number(value);
+  return Number.isInteger(parsedValue) && parsedValue >= 0 ? parsedValue : null;
 };
 
 router.post("/create-list", authMiddleware, async (req, res) => {
@@ -127,10 +134,18 @@ router.post(
         select: {
           item_id: true,
           quantity: true,
+          purchased_quantity: true,
         },
       });
 
-      if (notFoundItems.length === 0) {
+      const remainingItems = notFoundItems
+        .map((itemList) => ({
+          item_id: itemList.item_id,
+          quantity: itemList.quantity - itemList.purchased_quantity,
+        }))
+        .filter((itemList) => itemList.quantity > 0);
+
+      if (remainingItems.length === 0) {
         return res.status(400).json({
           message: "No hay productos no encontrados para crear una lista",
         });
@@ -141,9 +156,10 @@ router.post(
           title: titleClean,
           home_id: sourceList.home_id,
           itemsList: {
-            create: notFoundItems.map((itemList) => ({
+            create: remainingItems.map((itemList) => ({
               item_id: itemList.item_id,
               quantity: itemList.quantity,
+              purchased_quantity: 0,
               check_take: false,
               status: "PENDING",
             })),
@@ -210,6 +226,7 @@ router.post("/add-item/:id_list", authMiddleware, async (req, res) => {
         item_id: id_item,
         list_id: id_list,
         quantity: quantity === undefined ? undefined : +quantity,
+        purchased_quantity: 0,
       },
       select: itemListSelect,
     });
@@ -266,7 +283,8 @@ router.post(
   authMiddleware,
   async (req, res) => {
     const { id_itemList } = req.params;
-    const { quantity, check_take, status, clientMutationId } = req.body;
+    const { quantity, purchased_quantity, check_take, status, clientMutationId } =
+      req.body;
     try {
       if (!id_itemList) {
         return res.status(400).json({ message: "Faltan datos" });
@@ -285,7 +303,30 @@ router.post(
         const nextQuantity = +quantity;
         if (itemList.quantity !== nextQuantity) data.quantity = nextQuantity;
       }
-      if (check_take !== undefined) {
+      if (purchased_quantity !== undefined) {
+        const nextPurchasedQuantity =
+          parseNonNegativeInteger(purchased_quantity);
+        if (nextPurchasedQuantity === null) {
+          return res
+            .status(400)
+            .json({ message: "La cantidad comprada no es valida" });
+        }
+
+        if (itemList.purchased_quantity !== nextPurchasedQuantity) {
+          data.purchased_quantity = nextPurchasedQuantity;
+        }
+
+        const targetQuantity = data.quantity ?? itemList.quantity;
+        const nextStatus =
+          nextPurchasedQuantity >= targetQuantity ? "FOUND" : "PENDING";
+        const nextCheckTake = nextStatus === "FOUND";
+
+        if (itemList.status !== nextStatus) data.status = nextStatus;
+        if (itemList.check_take !== nextCheckTake) {
+          data.check_take = nextCheckTake;
+        }
+      }
+      if (check_take !== undefined && purchased_quantity === undefined) {
         const nextCheckTake = parseBoolean(check_take);
         if (itemList.check_take !== nextCheckTake) {
           data.check_take = nextCheckTake;
@@ -306,6 +347,13 @@ router.post(
         const nextCheckTake = nextStatus === "FOUND";
         if (itemList.check_take !== nextCheckTake) {
           data.check_take = nextCheckTake;
+        }
+        if (
+          nextStatus === "NOT_FOUND" &&
+          purchased_quantity === undefined &&
+          itemList.purchased_quantity !== 0
+        ) {
+          data.purchased_quantity = 0;
         }
       }
 
@@ -593,6 +641,7 @@ router.get("/:id_home/:id_list", authMiddleware, async (req, res) => {
         item_id: true,
         list_id: true,
         quantity: true,
+        purchased_quantity: true,
         item: {
           select: itemSelect,
         },

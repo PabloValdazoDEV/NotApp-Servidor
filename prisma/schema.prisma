@@ -23,8 +23,20 @@ enum CATEGORY {
     DULCES
     CONGELADOS
     HIGIENE
+    BELLEZA
     LIMPIEZA
     MASCOTAS
+    DESAYUNOS
+    CAFE_INFUSIONES
+    PASTA_ARROZ_LEGUMBRES
+    CONSERVAS
+    HUEVOS
+    ACEITES_SALSAS_CONDIMENTOS
+    CHARCUTERIA
+    APERITIVOS
+    PLATOS_PREPARADOS
+    BEBE
+    FARMACIA
     OTROS
 }
 
@@ -115,6 +127,7 @@ model ItemList {
     item_id    String
     list_id    String
     quantity   Int       @default(1)
+    purchased_quantity Int @default(0)
     check_take Boolean   @default(false)
     status     ITEM_LIST_STATUS @default(PENDING)
     list       List      @relation(fields: [list_id], references: [id], onDelete: Cascade)
