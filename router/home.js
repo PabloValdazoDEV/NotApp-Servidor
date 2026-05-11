@@ -57,13 +57,29 @@ router.get("/user-home/:user_id", authMiddleware, async (req, res) => {
     if (!user) {
       return res.status(400).json({ message: "No existe ese usuario" });
     }
-    const data = await prisma.home.findMany({
+    const favorites = await prisma.homeFavorite.findMany({
+      where: { user_id },
+      select: { home_id: true },
+    });
+    const favoriteHomeIds = new Set(
+      favorites.map((favorite) => favorite.home_id)
+    );
+
+    const homes = await prisma.home.findMany({
       where: { members: { some: { user_id } } },
       include: {
         members: true,
       },
       orderBy: { name: "asc" },
     });
+
+    const data = homes
+      .map((home) => ({
+        ...home,
+        is_favorite: favoriteHomeIds.has(home.id),
+      }))
+      .sort((a, b) => Number(b.is_favorite) - Number(a.is_favorite));
+
     res.send(data);
   } catch (error) {
     console.error(error);
@@ -184,6 +200,52 @@ router.post("/:home_id/transfer-owner", authMiddleware, async (req, res) => {
   }
 });
 
+router.post("/:home_id/favorite", authMiddleware, async (req, res) => {
+  const { home_id } = req.params;
+  const userId = req.user?.id;
+
+  try {
+    if (!home_id || !userId) {
+      return res.status(400).json({ message: "Faltan datos" });
+    }
+
+    const member = await prisma.member.findFirst({
+      where: {
+        home_id,
+        user_id: userId,
+      },
+    });
+
+    if (!member) {
+      return res.status(403).json({
+        message: "No perteneces a este hogar",
+      });
+    }
+
+    const favorite = await prisma.homeFavorite.upsert({
+      where: {
+        user_id_home_id: {
+          user_id: userId,
+          home_id,
+        },
+      },
+      update: {},
+      create: {
+        user_id: userId,
+        home_id,
+      },
+    });
+
+    res.json({
+      message: "Hogar marcado como favorito",
+      favorite,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 router.post(
   "/:hogar_id",
   authMiddleware,
@@ -237,6 +299,31 @@ router.post(
     }
   }
 );
+
+router.delete("/:home_id/favorite", authMiddleware, async (req, res) => {
+  const { home_id } = req.params;
+  const userId = req.user?.id;
+
+  try {
+    if (!home_id || !userId) {
+      return res.status(400).json({ message: "Faltan datos" });
+    }
+
+    await prisma.homeFavorite.deleteMany({
+      where: {
+        home_id,
+        user_id: userId,
+      },
+    });
+
+    res.json({
+      message: "Hogar eliminado de favoritos",
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
 
 router.delete("/:hogar_id", authMiddleware, async (req, res) => {
   const { hogar_id } = req.params;

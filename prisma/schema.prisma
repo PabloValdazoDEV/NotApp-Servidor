@@ -68,6 +68,7 @@ model User {
     error_logins  ErrorLogin[]
     members       Member[]
     invitations   Invitation[]
+    favoriteHomes HomeFavorite[]
     oneTimeTokens OneTimeToken[]
     createdAt     DateTime       @default(now())
     updatedAt     DateTime       @updatedAt
@@ -104,10 +105,22 @@ model Home {
     image       String?
     members     Member[]
     invitations Invitation[]
+    favoriteBy  HomeFavorite[]
     lists       List[]
     items       Item[]
     createdAt   DateTime     @default(now())
     updatedAt   DateTime     @updatedAt
+}
+
+model HomeFavorite {
+    id        String   @id @default(uuid())
+    user_id   String
+    home_id   String
+    user      User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+    home      Home     @relation(fields: [home_id], references: [id], onDelete: Cascade)
+    createdAt DateTime @default(now())
+
+    @@unique([user_id, home_id])
 }
 
 model List {
