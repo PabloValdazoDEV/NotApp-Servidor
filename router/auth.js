@@ -6,6 +6,7 @@ const jwt = require("jsonwebtoken");
 const { DateTime } = require("luxon");
 const authMiddleware = require("../middleware/auth.middleware");
 const transporter = require("../config/nodemailer");
+const { renderEmail, getEmailAttachments } = require("../config/emailTemplate");
 require("dotenv").config();
 
 const register = process.env.URL_REGISTER;
@@ -215,7 +216,15 @@ router.post("/forgot-password", async (req, res) => {
       from: '"NotApp" <no-reply@notapp.com>',
       to: email,
       subject: "Restablecer contraseña",
-      html: `<p>Haz clic aquí para restablecer tu contraseña:</p><a href="${link}">${link}</a>`,
+      html: renderEmail({
+        preheader: "Restablece tu contraseña de NotApp.",
+        eyebrow: "Recuperacion de cuenta",
+        title: "Restablece tu contraseña",
+        body: "Hemos recibido una solicitud para cambiar la contraseña de tu cuenta. Este enlace caduca en 30 minutos.",
+        buttonText: "Cambiar contraseña",
+        link,
+      }),
+      attachments: getEmailAttachments(),
     };
 
     transporter.sendMail(mailOptions, (error) => {

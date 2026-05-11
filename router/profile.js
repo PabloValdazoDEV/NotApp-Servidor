@@ -5,6 +5,7 @@ const authMiddleware = require("../middleware/auth.middleware");
 const multer = require("multer");
 const upload = multer({ dest: "uploads/" });
 const cloudinary = require("cloudinary").v2;
+const { uploadImage } = require("../config/cloudinaryUpload");
 require("dotenv").config();
 
 router.get("/:id_user", authMiddleware, async (req, res) => {
@@ -80,7 +81,7 @@ router.post(
           if (user.image) {
             cloudinary.uploader.destroy(user.image);
           }
-          const result = await cloudinary.uploader.upload(req.file.path);
+          const result = await uploadImage(req.file.path);
           image.push(result);
         } else if (user.image) {
           image.push({ public_id: user.image });

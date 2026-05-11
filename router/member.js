@@ -6,6 +6,7 @@ const jwt = require("jsonwebtoken");
 const { DateTime } = require("luxon");
 const authMiddleware = require("../middleware/auth.middleware");
 const transporter = require("../config/nodemailer");
+const { renderEmail, getEmailAttachments } = require("../config/emailTemplate");
 require("dotenv").config();
 
 router.post("/register-special", async (req, res) => {
@@ -253,7 +254,15 @@ router.post("/invite/:id_hogar", authMiddleware, async (req, res) => {
         from: '"NotApp" <no-reply@notapp.com>',
         to: email,
         subject: `Initación al hogar ${home.name}`,
-        html: `<p>Haz clic aquí para registrarte:</p><a href="${link}">${link}</a>`,
+        html: renderEmail({
+          preheader: `Te han invitado a unirte al hogar ${home.name} en NotApp.`,
+          eyebrow: "Invitacion a NotApp",
+          title: "Te han invitado a un hogar",
+          body: `Acepta la invitacion para unirte a ${home.name} y empezar a compartir listas, productos y compras con tu hogar.`,
+          buttonText: "Aceptar invitacion",
+          link,
+        }),
+        attachments: getEmailAttachments(),
       };
 
       transporter.sendMail(mailOptions, (error) => {

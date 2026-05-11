@@ -5,6 +5,7 @@ const authMiddleware = require("../middleware/auth.middleware");
 const multer = require("multer");
 const upload = multer({ dest: "uploads/" });
 const cloudinary = require("cloudinary").v2;
+const { uploadImage } = require("../config/cloudinaryUpload");
 
 const supermarkets = [
   "CUALQUIERA",
@@ -27,10 +28,32 @@ const normalizeSupermarket = (supermarket) => {
     : "CUALQUIERA";
 };
 
+const getPaginationParams = (query) => {
+  const page = Math.max(Number(query.page) || 1, 1);
+  const pageSize = Math.max(Number(query.pageSize || query.limit) || 10, 1);
+  return {
+    page,
+    pageSize,
+    skip: pageSize * (page - 1),
+  };
+};
+
+const buildPagination = (page, pageSize, total) => {
+  const totalPages = Math.ceil(total / pageSize);
+  return {
+    page,
+    pageSize,
+    total,
+    totalPages,
+    hasNextPage: page < totalPages,
+    hasPreviousPage: page > 1,
+  };
+};
+
 const duplicateCloudinaryImage = async (publicId) => {
   if (!publicId) return null;
   const imageUrl = cloudinary.url(publicId, { secure: true });
-  const result = await cloudinary.uploader.upload(imageUrl);
+  const result = await uploadImage(imageUrl);
   return result.public_id;
 };
 
@@ -54,7 +77,7 @@ router.post(
       const image = [];
 
       if (req.file?.path) {
-        const result = await cloudinary.uploader.upload(req.file.path);
+        const result = await uploadImage(req.file.path);
         image.push(result);
       }
       const cleanedName = name?.trim();
@@ -230,7 +253,7 @@ router.post(
           if (item.image) {
             cloudinary.uploader.destroy(item.image);
           }
-          const result = await cloudinary.uploader.upload(req.file.path);
+          const result = await uploadImage(req.file.path);
           image.push(result);
         } else if (item.image) {
           image.push({ public_id: item.image });
@@ -286,12 +309,12 @@ router.delete("/:item_id", authMiddleware, async (req, res) => {
 router.get("/params/:id_home", authMiddleware, async (req, res) => {
   const { element, page, name, category, supermarket } = req.query;
   const { id_home } = req.params;
-  const salto = 10 * (page - 1);
+  const { page: pageNumber, pageSize, skip } = getPaginationParams(req.query);
   const supermarketFilter = supermarket
     ? normalizeSupermarket(supermarket)
     : null;
   try {
-    if (!page && !element && !id_home) {
+    if (!id_home) {
       return res.status(400).json({ message: "Faltan datos" });
     }
     const home = await prisma.home.findUnique({ where: { id: id_home } });
@@ -300,40 +323,47 @@ router.get("/params/:id_home", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "No existe ese hogar" });
     }
 
+    const where = {
+      home_id: id_home,
+      AND: [
+        name
+          ? {
+              name: {
+                contains: name,
+                mode: "insensitive",
+              },
+            }
+          : {},
+        category
+          ? {
+              categories: {
+                has: category,
+              },
+            }
+          : {},
+        supermarketFilter && supermarketFilter !== "CUALQUIERA"
+          ? {
+              supermarket: supermarketFilter,
+            }
+          : {},
+      ],
+    };
+
+    const total = await prisma.item.count({ where });
+
     const items = await prisma.item.findMany({
-      where: {
-        home_id: id_home,
-        AND: [
-          name
-            ? {
-                name: {
-                  contains: name,
-                  mode: "insensitive",
-                },
-              }
-            : {},
-          category
-            ? {
-                categories: {
-                  has: category,
-                },
-              }
-            : {},
-          supermarketFilter && supermarketFilter !== "CUALQUIERA"
-            ? {
-                supermarket: supermarketFilter,
-              }
-            : {},
-        ],
-      },
+      where,
       orderBy: {
         name: "asc",
       },
-      skip: salto,
-      take: 10,
+      skip,
+      take: pageSize,
     });
 
-    return res.json(items);
+    return res.json({
+      items,
+      pagination: buildPagination(pageNumber, pageSize, total),
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });

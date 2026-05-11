@@ -5,6 +5,7 @@ const authMiddleware = require("../middleware/auth.middleware");
 const multer = require("multer");
 const upload = multer({ dest: "uploads/" });
 const cloudinary = require("cloudinary").v2;
+const { uploadImage } = require("../config/cloudinaryUpload");
 
 router.post(
   "/create-home",
@@ -20,7 +21,7 @@ router.post(
       const image = [];
 
       if (req.file?.path) {
-        const result = await cloudinary.uploader.upload(req.file.path);
+        const result = await uploadImage(req.file.path);
         image.push(result);
       }
 
@@ -105,6 +106,84 @@ router.get("/:id", authMiddleware, async (req, res) => {
   }
 });
 
+router.post("/:home_id/transfer-owner", authMiddleware, async (req, res) => {
+  const { home_id } = req.params;
+  const { new_owner_member_id } = req.body;
+  const userId = req.user?.id;
+
+  try {
+    if (!home_id || !new_owner_member_id || !userId) {
+      return res.status(400).json({ message: "Faltan datos" });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const currentOwner = await tx.member.findFirst({
+        where: {
+          home_id,
+          user_id: userId,
+          role: "OWNER",
+        },
+      });
+
+      if (!currentOwner) {
+        return {
+          status: 403,
+          body: { message: "Solo el propietario puede transferir el hogar" },
+        };
+      }
+
+      const newOwner = await tx.member.findUnique({
+        where: {
+          id: new_owner_member_id,
+        },
+      });
+
+      if (!newOwner || newOwner.home_id !== home_id) {
+        return {
+          status: 400,
+          body: { message: "El nuevo propietario no pertenece a este hogar" },
+        };
+      }
+
+      if (newOwner.id === currentOwner.id) {
+        return {
+          status: 400,
+          body: { message: "El nuevo propietario debe ser otro miembro" },
+        };
+      }
+
+      const updatedOwner = await tx.member.update({
+        where: {
+          id: new_owner_member_id,
+        },
+        data: {
+          role: "OWNER",
+        },
+      });
+
+      await tx.member.delete({
+        where: {
+          id: currentOwner.id,
+        },
+      });
+
+      return {
+        status: 200,
+        body: {
+          message: "Propiedad transferida correctamente",
+          owner: updatedOwner,
+          removedMemberId: currentOwner.id,
+        },
+      };
+    });
+
+    return res.status(result.status).json(result.body);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 router.post(
   "/:hogar_id",
   authMiddleware,
@@ -132,7 +211,7 @@ router.post(
           if (hogar.image) {
             cloudinary.uploader.destroy(hogar.image);
           }
-          const result = await cloudinary.uploader.upload(req.file.path);
+          const result = await uploadImage(req.file.path);
           image.push(result);
         } else if (hogar.image) {
           image.push({ public_id: hogar.image });

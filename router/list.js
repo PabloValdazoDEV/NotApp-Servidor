@@ -73,6 +73,28 @@ const parseNonNegativeInteger = (value) => {
   return Number.isInteger(parsedValue) && parsedValue >= 0 ? parsedValue : null;
 };
 
+const getPaginationParams = (query) => {
+  const page = Math.max(Number(query.page) || 1, 1);
+  const pageSize = Math.max(Number(query.pageSize || query.limit) || 10, 1);
+  return {
+    page,
+    pageSize,
+    skip: pageSize * (page - 1),
+  };
+};
+
+const buildPagination = (page, pageSize, total) => {
+  const totalPages = Math.ceil(total / pageSize);
+  return {
+    page,
+    pageSize,
+    total,
+    totalPages,
+    hasNextPage: page < totalPages,
+    hasPreviousPage: page > 1,
+  };
+};
+
 router.post("/create-list", authMiddleware, async (req, res) => {
   const { title, id_home } = req.body;
   const titleClean = title.trim();
@@ -470,9 +492,9 @@ router.delete("/delete-list/:id_list", authMiddleware, async (req, res) => {
 router.get("/params/items/:id_list", authMiddleware, async (req, res) => {
   const { page, name } = req.query;
   const { id_list } = req.params;
-  const salto = 10 * (page - 1);
+  const { page: pageNumber, pageSize, skip } = getPaginationParams(req.query);
   try {
-    if (!page && !id_list) {
+    if (!id_list) {
       return res.status(400).json({ message: "Faltan datos" });
     }
     const list = await prisma.list.findUnique({ where: { id: id_list } });
@@ -481,16 +503,20 @@ router.get("/params/items/:id_list", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "No existe ese hogar" });
     }
 
-    const items = await prisma.itemList.findMany({
-      where: {
-        list_id: id_list,
-        item:{
-          name: {
+    const where = {
+      list_id: id_list,
+      item: {
+        name: {
           contains: name,
           mode: "insensitive",
         },
-        }
       },
+    };
+
+    const total = await prisma.itemList.count({ where });
+
+    const items = await prisma.itemList.findMany({
+      where,
       include: {
         item: {
           select: itemSelect,
@@ -501,11 +527,14 @@ router.get("/params/items/:id_list", authMiddleware, async (req, res) => {
           name: "asc",
         },
       },
-      skip: salto,
-      take: 10,
+      skip,
+      take: pageSize,
     });
 
-    return res.json(items);
+    return res.json({
+      items,
+      pagination: buildPagination(pageNumber, pageSize, total),
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -515,10 +544,9 @@ router.get("/params/items/:id_list", authMiddleware, async (req, res) => {
 router.get("/params/:id_home", authMiddleware, async (req, res) => {
   const { page, title } = req.query;
   const { id_home } = req.params;
-  const pageNumber = Number(page) || 1;
-  const salto = 10 * (pageNumber - 1);
+  const { page: pageNumber, pageSize, skip } = getPaginationParams(req.query);
   try {
-    if (!page && !id_home) {
+    if (!id_home) {
       return res.status(400).json({ message: "Faltan datos" });
     }
     const home = await prisma.home.findUnique({ where: { id: id_home } });
@@ -559,7 +587,10 @@ router.get("/params/:id_home", authMiddleware, async (req, res) => {
       return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
     });
 
-    return res.json(sortedLists.slice(salto, salto + 10));
+    return res.json({
+      items: sortedLists.slice(skip, skip + pageSize),
+      pagination: buildPagination(pageNumber, pageSize, sortedLists.length),
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
