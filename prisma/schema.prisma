@@ -60,18 +60,23 @@ enum SUPERMARKET {
 }
 
 model User {
-  id            String         @id @default(uuid())
-  email         String         @unique
-  name          String?
-  password      String
-  image         String?
-  error_logins  ErrorLogin[]
-  members       Member[]
-  invitations   Invitation[]
-  favoriteHomes HomeFavorite[]
-  oneTimeTokens OneTimeToken[]
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  id                          String         @id @default(uuid())
+  email                       String         @unique
+  name                        String?
+  password                    String
+  image                       String?
+  onboarding_completed_at     DateTime?
+  onboarding_version          Int?
+  tutorial_home_id            String?
+  install_prompt_completed_at DateTime?
+  install_prompt_skipped_at   DateTime?
+  error_logins                ErrorLogin[]
+  members                     Member[]
+  invitations                 Invitation[]
+  favoriteHomes               HomeFavorite[]
+  oneTimeTokens               OneTimeToken[]
+  createdAt                   DateTime       @default(now())
+  updatedAt                   DateTime       @updatedAt
 }
 
 model Member {
@@ -104,6 +109,7 @@ model Home {
   id          String         @id @default(uuid())
   name        String
   image       String?
+  is_tutorial Boolean        @default(false)
   members     Member[]
   invitations Invitation[]
   favoriteBy  HomeFavorite[]

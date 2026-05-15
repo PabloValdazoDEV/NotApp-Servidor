@@ -388,6 +388,13 @@ router.post("/invite/:id_hogar", authMiddleware, async (req, res) => {
       });
     }
 
+    if (home.is_tutorial) {
+      return res.status(400).json({
+        success: false,
+        message: "No se pueden enviar invitaciones desde un hogar tutorial.",
+      });
+    }
+
     const requester = home.members.find(
       (member) =>
         member.user_id === req.user?.id && ADMIN_ROLES.includes(member.role)

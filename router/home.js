@@ -52,11 +52,66 @@ router.get("/user-home/:user_id", authMiddleware, async (req, res) => {
     if (!user_id) {
       return res.status(400).json({ message: "Faltan datos" });
     }
-    const user = await prisma.user.findUnique({ where: { id: user_id } });
+    const user = await prisma.user.findUnique({
+      where: { id: user_id },
+      select: {
+        id: true,
+        tutorial_home_id: true,
+      },
+    });
 
     if (!user) {
       return res.status(400).json({ message: "No existe ese usuario" });
     }
+
+    const tutorialHome = await prisma.home.findFirst({
+      where: {
+        is_tutorial: true,
+        members: {
+          some: {
+            user_id,
+          },
+          every: {
+            user_id,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (tutorialHome) {
+      await Promise.all([
+        prisma.homeFavorite.upsert({
+          where: {
+            user_id_home_id: {
+              user_id,
+              home_id: tutorialHome.id,
+            },
+          },
+          update: {},
+          create: {
+            user_id,
+            home_id: tutorialHome.id,
+          },
+        }),
+        user.tutorial_home_id === tutorialHome.id
+          ? Promise.resolve()
+          : prisma.user.update({
+              where: {
+                id: user_id,
+              },
+              data: {
+                tutorial_home_id: tutorialHome.id,
+              },
+            }),
+      ]);
+    }
+
     const favorites = await prisma.homeFavorite.findMany({
       where: { user_id },
       select: { home_id: true },
@@ -307,6 +362,44 @@ router.delete("/:home_id/favorite", authMiddleware, async (req, res) => {
   try {
     if (!home_id || !userId) {
       return res.status(400).json({ message: "Faltan datos" });
+    }
+
+    const tutorialHome = await prisma.home.findFirst({
+      where: {
+        id: home_id,
+        is_tutorial: true,
+        members: {
+          some: {
+            user_id: userId,
+          },
+          every: {
+            user_id: userId,
+          },
+        },
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (tutorialHome) {
+      await prisma.homeFavorite.upsert({
+        where: {
+          user_id_home_id: {
+            user_id: userId,
+            home_id,
+          },
+        },
+        update: {},
+        create: {
+          user_id: userId,
+          home_id,
+        },
+      });
+
+      return res.json({
+        message: "El hogar tutorial se mantiene como favorito",
+      });
     }
 
     await prisma.homeFavorite.deleteMany({
