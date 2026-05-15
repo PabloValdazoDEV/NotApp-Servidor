@@ -76,27 +76,6 @@ const findValidTutorialHome = async (userId, homeId, tx = prisma) => {
   });
 };
 
-const findExistingTutorialHome = async (userId, tx = prisma) =>
-  tx.home.findFirst({
-    where: {
-      is_tutorial: true,
-      members: {
-        some: {
-          user_id: userId,
-        },
-        every: {
-          user_id: userId,
-        },
-      },
-    },
-    orderBy: {
-      createdAt: "asc",
-    },
-    select: {
-      id: true,
-    },
-  });
-
 const ensureTutorialHomeFavorite = async (userId, homeId, tx = prisma) =>
   tx.homeFavorite.upsert({
     where: {
@@ -166,7 +145,23 @@ const createTutorialHome = async (userId, tx) => {
   return home;
 };
 
-const getOrCreateTutorialHome = async (userId) =>
+const createAndAssignTutorialHome = async (userId, tx) => {
+  const newTutorialHome = await createTutorialHome(userId, tx);
+  await ensureTutorialHomeFavorite(userId, newTutorialHome.id, tx);
+
+  await tx.user.update({
+    where: {
+      id: userId,
+    },
+    data: {
+      tutorial_home_id: newTutorialHome.id,
+    },
+  });
+
+  return newTutorialHome;
+};
+
+const getOrCreateTutorialHome = async (userId, options = {}) =>
   prisma.$transaction(async (tx) => {
     const user = await tx.user.findUnique({
       where: {
@@ -181,6 +176,10 @@ const getOrCreateTutorialHome = async (userId) =>
       throw new Error("Usuario no encontrado");
     }
 
+    if (options.recreate) {
+      return createAndAssignTutorialHome(userId, tx);
+    }
+
     const validTutorialHome = await findValidTutorialHome(
       userId,
       user.tutorial_home_id,
@@ -188,43 +187,13 @@ const getOrCreateTutorialHome = async (userId) =>
     );
 
     if (validTutorialHome) {
-      await ensureTutorialHomeFavorite(userId, validTutorialHome.id, tx);
       return validTutorialHome;
     }
 
-    const existingTutorialHome = await findExistingTutorialHome(userId, tx);
-
-    if (existingTutorialHome) {
-      await ensureTutorialHomeFavorite(userId, existingTutorialHome.id, tx);
-      await tx.user.update({
-        where: {
-          id: userId,
-        },
-        data: {
-          tutorial_home_id: existingTutorialHome.id,
-        },
-      });
-
-      return existingTutorialHome;
-    }
-
-    const newTutorialHome = await createTutorialHome(userId, tx);
-    await ensureTutorialHomeFavorite(userId, newTutorialHome.id, tx);
-
-    await tx.user.update({
-      where: {
-        id: userId,
-      },
-      data: {
-        tutorial_home_id: newTutorialHome.id,
-      },
-    });
-
-    return newTutorialHome;
+    return createAndAssignTutorialHome(userId, tx);
   });
 
 const buildOnboardingResponse = async (userId) => {
-  const tutorialHome = await getOrCreateTutorialHome(userId);
   const user = await prisma.user.findUnique({
     where: {
       id: userId,
@@ -242,11 +211,27 @@ const buildOnboardingResponse = async (userId) => {
     throw new Error("Usuario no encontrado");
   }
 
+  const tutorialHome = await findValidTutorialHome(
+    userId,
+    user.tutorial_home_id
+  );
+
+  if (user.tutorial_home_id && !tutorialHome) {
+    await prisma.user.update({
+      where: {
+        id: userId,
+      },
+      data: {
+        tutorial_home_id: null,
+      },
+    });
+  }
+
   return {
     completed: Boolean(user.onboarding_completed_at),
     completedAt: user.onboarding_completed_at,
     version: user.onboarding_version || CURRENT_ONBOARDING_VERSION,
-    tutorialHomeId: user.tutorial_home_id || tutorialHome.id,
+    tutorialHomeId: tutorialHome?.id || null,
     installPromptCompletedAt: user.install_prompt_completed_at,
     installPromptSkippedAt: user.install_prompt_skipped_at,
   };
@@ -274,7 +259,6 @@ router.post("/complete", authMiddleware, async (req, res) => {
   if (!userId) return;
 
   try {
-    await getOrCreateTutorialHome(userId);
     await prisma.user.update({
       where: {
         id: userId,
@@ -297,7 +281,6 @@ router.post("/skip", authMiddleware, async (req, res) => {
   if (!userId) return;
 
   try {
-    await getOrCreateTutorialHome(userId);
     await prisma.user.update({
       where: {
         id: userId,
@@ -320,7 +303,9 @@ router.post("/tutorial-home", authMiddleware, async (req, res) => {
   if (!userId) return;
 
   try {
-    const tutorialHome = await getOrCreateTutorialHome(userId);
+    const tutorialHome = await getOrCreateTutorialHome(userId, {
+      recreate: req.body?.recreate === true || req.body?.recreate === "true",
+    });
 
     return res.json({
       success: true,

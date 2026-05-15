@@ -29,6 +29,7 @@ class ExternalImageError extends Error {}
 const supermarkets = [
   "CUALQUIERA",
   "MERCADONA",
+  "AHORRAMAS",
   "CARREFOUR",
   "LIDL",
   "ALDI",

@@ -10,6 +10,7 @@ const { renderEmail, getEmailAttachments } = require("../config/emailTemplate");
 require("dotenv").config();
 
 const register = process.env.URL_REGISTER;
+const mailFrom = process.env.MAIL_FROM || '"NotApp" <no-reply@notapp.com>';
 
 router.post(register, async (req, res) => {
   const { name, email, emailConfirm, password, passwordConfirm } = req.body;
@@ -213,7 +214,7 @@ router.post("/forgot-password", async (req, res) => {
     const link = `${process.env.URL}reset-password?token=${token}`;
 
     const mailOptions = {
-      from: '"NotApp" <no-reply@notapp.com>',
+      from: mailFrom,
       to: email,
       subject: "Restablecer contraseña",
       html: renderEmail({

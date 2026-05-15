@@ -12,6 +12,7 @@ require("dotenv").config();
 const MAX_HOME_MEMBERS = 8;
 const ADMIN_ROLES = ["OWNER", "ADMIN"];
 const MEMBER_ROLES = ["OWNER", "ADMIN", "MEMBER"];
+const mailFrom = process.env.MAIL_FROM || '"NotApp" <no-reply@notapp.com>';
 
 const normalizeEmail = (email) =>
   typeof email === "string" ? email.trim().toLowerCase() : "";
@@ -464,7 +465,7 @@ router.post("/invite/:id_hogar", authMiddleware, async (req, res) => {
       const link = `${process.env.URL}register-special?token=${token}`;
 
       const mailOptions = {
-        from: '"NotApp" <no-reply@notapp.com>',
+        from: mailFrom,
         to: emailClean,
         subject: `Initación al hogar ${home.name}`,
         html: renderEmail({

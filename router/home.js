@@ -52,64 +52,10 @@ router.get("/user-home/:user_id", authMiddleware, async (req, res) => {
     if (!user_id) {
       return res.status(400).json({ message: "Faltan datos" });
     }
-    const user = await prisma.user.findUnique({
-      where: { id: user_id },
-      select: {
-        id: true,
-        tutorial_home_id: true,
-      },
-    });
+    const user = await prisma.user.findUnique({ where: { id: user_id } });
 
     if (!user) {
       return res.status(400).json({ message: "No existe ese usuario" });
-    }
-
-    const tutorialHome = await prisma.home.findFirst({
-      where: {
-        is_tutorial: true,
-        members: {
-          some: {
-            user_id,
-          },
-          every: {
-            user_id,
-          },
-        },
-      },
-      orderBy: {
-        createdAt: "asc",
-      },
-      select: {
-        id: true,
-      },
-    });
-
-    if (tutorialHome) {
-      await Promise.all([
-        prisma.homeFavorite.upsert({
-          where: {
-            user_id_home_id: {
-              user_id,
-              home_id: tutorialHome.id,
-            },
-          },
-          update: {},
-          create: {
-            user_id,
-            home_id: tutorialHome.id,
-          },
-        }),
-        user.tutorial_home_id === tutorialHome.id
-          ? Promise.resolve()
-          : prisma.user.update({
-              where: {
-                id: user_id,
-              },
-              data: {
-                tutorial_home_id: tutorialHome.id,
-              },
-            }),
-      ]);
     }
 
     const favorites = await prisma.homeFavorite.findMany({
@@ -144,8 +90,10 @@ router.get("/user-home/:user_id", authMiddleware, async (req, res) => {
 
 router.get("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
+  const userId = req.user?.id;
+
   try {
-    if (!id) {
+    if (!id || !userId) {
       return res.status(400).json({ message: "Faltan datos" });
     }
 
@@ -165,6 +113,19 @@ router.get("/:id", authMiddleware, async (req, res) => {
         },
       },
     });
+
+    if (!hogar) {
+      return res.status(404).json({ message: "El hogar no existe" });
+    }
+
+    const currentMember = hogar.members.find(
+      (member) => member.user_id === userId
+    );
+
+    if (!currentMember) {
+      return res.status(403).json({ message: "No perteneces a este hogar" });
+    }
+
     const roleOrder = { OWNER: 0, ADMIN: 1, MEMBER: 2 };
 
     hogar.members.sort((a, b) => {
@@ -364,44 +325,6 @@ router.delete("/:home_id/favorite", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "Faltan datos" });
     }
 
-    const tutorialHome = await prisma.home.findFirst({
-      where: {
-        id: home_id,
-        is_tutorial: true,
-        members: {
-          some: {
-            user_id: userId,
-          },
-          every: {
-            user_id: userId,
-          },
-        },
-      },
-      select: {
-        id: true,
-      },
-    });
-
-    if (tutorialHome) {
-      await prisma.homeFavorite.upsert({
-        where: {
-          user_id_home_id: {
-            user_id: userId,
-            home_id,
-          },
-        },
-        update: {},
-        create: {
-          user_id: userId,
-          home_id,
-        },
-      });
-
-      return res.json({
-        message: "El hogar tutorial se mantiene como favorito",
-      });
-    }
-
     await prisma.homeFavorite.deleteMany({
       where: {
         home_id,
@@ -420,20 +343,68 @@ router.delete("/:home_id/favorite", authMiddleware, async (req, res) => {
 
 router.delete("/:hogar_id", authMiddleware, async (req, res) => {
   const { hogar_id } = req.params;
+  const userId = req.user?.id;
+
   try {
-    if (!hogar_id) {
+    if (!hogar_id || !userId) {
       return res.status(400).json({ message: "Faltan datos" });
     }
-    const hogar = await prisma.home.findUnique({ where: { id: hogar_id } });
+    const hogar = await prisma.home.findUnique({
+      where: { id: hogar_id },
+      include: {
+        members: {
+          select: {
+            user_id: true,
+            role: true,
+          },
+        },
+      },
+    });
 
     if (!hogar) {
       return res.status(400).json({ message: "El hogar no existe" });
     }
 
-    if (hogar.image) {
-      cloudinary.uploader.destroy(hogar.image);
+    const ownerMember = hogar.members.find(
+      (member) => member.user_id === userId && member.role === "OWNER"
+    );
+
+    if (!ownerMember) {
+      return res
+        .status(403)
+        .json({ message: "Solo el propietario puede borrar este hogar" });
     }
-    await prisma.home.delete({ where: { id: hogar_id } });
+
+    if (
+      hogar.is_tutorial &&
+      !hogar.members.every((member) => member.user_id === userId)
+    ) {
+      return res.status(403).json({
+        message: "No puedes borrar un hogar tutorial compartido",
+      });
+    }
+
+    if (hogar.image) {
+      await cloudinary.uploader.destroy(hogar.image);
+    }
+
+    await prisma.$transaction([
+      ...(hogar.is_tutorial
+        ? [
+            prisma.user.updateMany({
+              where: {
+                id: userId,
+                tutorial_home_id: hogar_id,
+              },
+              data: {
+                tutorial_home_id: null,
+              },
+            }),
+          ]
+        : []),
+      prisma.home.delete({ where: { id: hogar_id } }),
+    ]);
+
     res.json({ message: "Hogar borrado correctamentename" });
   } catch (error) {
     console.error(error);
