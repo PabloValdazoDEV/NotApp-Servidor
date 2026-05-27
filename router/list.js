@@ -43,7 +43,60 @@ const itemListStatsSelect = {
   status: true,
 };
 
+const listStatsSelect = {
+  id: true,
+  title: true,
+  home_id: true,
+  fav: true,
+  listCheck: true,
+  copied_from_not_found_list_id: true,
+  createdAt: true,
+  updatedAt: true,
+  itemsList: {
+    select: itemListStatsSelect,
+  },
+};
+
 const itemListStatuses = ["PENDING", "FOUND", "NOT_FOUND"];
+
+const getNotFoundCopyMap = async (lists) => {
+  const listIds = lists.map((list) => list.id).filter(Boolean);
+
+  if (listIds.length === 0) return new Map();
+
+  const copies = await prisma.list.findMany({
+    where: {
+      copied_from_not_found_list_id: {
+        in: listIds,
+      },
+    },
+    select: {
+      id: true,
+      copied_from_not_found_list_id: true,
+    },
+  });
+
+  return new Map(
+    copies.map((copy) => [copy.copied_from_not_found_list_id, copy.id])
+  );
+};
+
+const addNotFoundCopyFields = (list, copyMap = new Map()) => {
+  if (!list) return list;
+
+  const notFoundCopyListId = copyMap.get(list.id) || null;
+
+  return {
+    ...list,
+    not_found_copy_list_id: notFoundCopyListId,
+    has_not_found_copy: Boolean(notFoundCopyListId),
+  };
+};
+
+const attachNotFoundCopyFields = async (lists) => {
+  const copyMap = await getNotFoundCopyMap(lists);
+  return lists.map((list) => addNotFoundCopyFields(list, copyMap));
+};
 
 const emitToList = (req, listId, event, payload) => {
   const io = req.app.get("io");
@@ -114,9 +167,13 @@ router.post("/create-list", authMiddleware, async (req, res) => {
         title,
         home_id: id_home,
       },
+      select: listStatsSelect,
     });
 
-    res.json({ message: "Lista creada correctamente", list: data });
+    res.json({
+      message: "Lista creada correctamente",
+      list: addNotFoundCopyFields(data),
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -148,6 +205,22 @@ router.post(
         return res.status(400).json({ message: "La lista origen no existe" });
       }
 
+      const existingCopy = await prisma.list.findFirst({
+        where: {
+          copied_from_not_found_list_id: id_list,
+        },
+        select: listStatsSelect,
+      });
+
+      if (existingCopy) {
+        return res.json({
+          message: "Lista ya creada anteriormente",
+          list: addNotFoundCopyFields(existingCopy),
+          reused: true,
+          clientMutationId,
+        });
+      }
+
       const notFoundItems = await prisma.itemList.findMany({
         where: {
           list_id: id_list,
@@ -177,6 +250,7 @@ router.post(
         data: {
           title: titleClean,
           home_id: sourceList.home_id,
+          copied_from_not_found_list_id: sourceList.id,
           itemsList: {
             create: remainingItems.map((itemList) => ({
               item_id: itemList.item_id,
@@ -187,24 +261,34 @@ router.post(
             })),
           },
         },
-        select: {
-          id: true,
-          title: true,
-          home_id: true,
-          createdAt: true,
-          updatedAt: true,
-          itemsList: {
-            select: itemListStatsSelect,
-          },
-        },
+        select: listStatsSelect,
       });
 
       return res.json({
         message: "Lista creada correctamente",
-        list,
+        list: addNotFoundCopyFields(list),
+        reused: false,
         clientMutationId,
       });
     } catch (error) {
+      if (error.code === "P2002") {
+        const existingCopy = await prisma.list.findFirst({
+          where: {
+            copied_from_not_found_list_id: req.params.id_list,
+          },
+          select: listStatsSelect,
+        });
+
+        if (existingCopy) {
+          return res.json({
+            message: "Lista ya creada anteriormente",
+            list: addNotFoundCopyFields(existingCopy),
+            reused: true,
+            clientMutationId: req.body?.clientMutationId,
+          });
+        }
+      }
+
       console.error(error);
       res.status(500).json({ message: "Server error" });
     }
@@ -392,7 +476,7 @@ router.post(
             select: itemListSelect,
           });
 
-      if (Object.keys(data).length) {
+      if (Object.keys(data).length || clientMutationId) {
         emitToList(req, updatedItemList.list_id, "itemlist:updated", {
           ...updatedItemList,
           clientMutationId,
@@ -587,8 +671,10 @@ router.get("/params/:id_home", authMiddleware, async (req, res) => {
       return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
     });
 
+    const paginatedLists = sortedLists.slice(skip, skip + pageSize);
+
     return res.json({
-      items: sortedLists.slice(skip, skip + pageSize),
+      items: await attachNotFoundCopyFields(paginatedLists),
       pagination: buildPagination(pageNumber, pageSize, sortedLists.length),
     });
   } catch (error) {
@@ -619,6 +705,7 @@ router.get("/home/:id_home", authMiddleware, async (req, res) => {
             listCheck: true,
             itemsList: true,
             id: true,
+            copied_from_not_found_list_id: true,
           },
         },
       },
@@ -627,7 +714,10 @@ router.get("/home/:id_home", authMiddleware, async (req, res) => {
     if (!home) {
       return res.status(400).json({ message: "No hay lista en el hogar" });
     }
-    res.send(home);
+    res.send({
+      ...home,
+      lists: await attachNotFoundCopyFields(home.lists),
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });

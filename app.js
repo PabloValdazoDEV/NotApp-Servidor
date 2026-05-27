@@ -40,38 +40,73 @@ io.on("connection", (socket) => {
     socket.join(`list:${list_id}`);
 
     try {
-      const items = await prisma.itemList.findMany({
-        where: { list_id },
-        orderBy: {
-          item: { name: "asc" },
-        },
+      const list = await prisma.list.findUnique({
+        where: { id: list_id },
         select: {
           id: true,
-          item_id: true,
-          list_id: true,
-          quantity: true,
-          purchased_quantity: true,
-          check_take: true,
-          status: true,
+          title: true,
+          home_id: true,
+          fav: true,
+          listCheck: true,
           updatedAt: true,
-          item: {
+          createdAt: true,
+          copied_from_not_found_list_id: true,
+          itemsList: {
+            orderBy: {
+              item: { name: "asc" },
+            },
             select: {
               id: true,
-              name: true,
-              home_id: true,
-              image: true,
-              price: true,
-              description: true,
-              categories: true,
-              supermarket: true,
-              createdAt: true,
+              item_id: true,
+              list_id: true,
+              quantity: true,
+              purchased_quantity: true,
+              check_take: true,
+              status: true,
               updatedAt: true,
+              item: {
+                select: {
+                  id: true,
+                  name: true,
+                  home_id: true,
+                  image: true,
+                  price: true,
+                  description: true,
+                  categories: true,
+                  supermarket: true,
+                  createdAt: true,
+                  updatedAt: true,
+                },
+              },
             },
           },
         },
       });
 
-      socket.emit("list:sync", { list_id, items });
+      const notFoundCopyList = list
+        ? await prisma.list.findFirst({
+            where: {
+              copied_from_not_found_list_id: list.id,
+            },
+            select: {
+              id: true,
+            },
+          })
+        : null;
+      const notFoundCopyListId = notFoundCopyList?.id || null;
+      const syncedList = list
+        ? {
+            ...list,
+            not_found_copy_list_id: notFoundCopyListId,
+            has_not_found_copy: Boolean(notFoundCopyListId),
+          }
+        : null;
+
+      socket.emit("list:sync", {
+        list_id,
+        list: syncedList,
+        items: list?.itemsList || [],
+      });
     } catch (error) {
       console.error(error);
     }

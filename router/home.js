@@ -7,6 +7,45 @@ const upload = multer({ dest: "uploads/" });
 const cloudinary = require("cloudinary").v2;
 const { uploadImage } = require("../config/cloudinaryUpload");
 
+const getNotFoundCopyMap = async (lists) => {
+  const listIds = lists.map((list) => list.id).filter(Boolean);
+
+  if (listIds.length === 0) return new Map();
+
+  const copies = await prisma.list.findMany({
+    where: {
+      copied_from_not_found_list_id: {
+        in: listIds,
+      },
+    },
+    select: {
+      id: true,
+      copied_from_not_found_list_id: true,
+    },
+  });
+
+  return new Map(
+    copies.map((copy) => [copy.copied_from_not_found_list_id, copy.id])
+  );
+};
+
+const addNotFoundCopyFields = (list, copyMap = new Map()) => {
+  if (!list) return list;
+
+  const notFoundCopyListId = copyMap.get(list.id) || null;
+
+  return {
+    ...list,
+    not_found_copy_list_id: notFoundCopyListId,
+    has_not_found_copy: Boolean(notFoundCopyListId),
+  };
+};
+
+const attachNotFoundCopyFields = async (lists) => {
+  const copyMap = await getNotFoundCopyMap(lists);
+  return lists.map((list) => addNotFoundCopyFields(list, copyMap));
+};
+
 router.post(
   "/create-home",
   authMiddleware,
@@ -131,7 +170,10 @@ router.get("/:id", authMiddleware, async (req, res) => {
     hogar.members.sort((a, b) => {
       return roleOrder[a.role] - roleOrder[b.role];
     });
-    res.send(hogar);
+    res.send({
+      ...hogar,
+      lists: await attachNotFoundCopyFields(hogar.lists),
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });

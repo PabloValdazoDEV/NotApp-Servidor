@@ -131,6 +131,86 @@ const getParsedUrl = (rawUrl) => {
   }
 };
 
+const normalizeImageUrlForComparison = (rawUrl) => {
+  if (typeof rawUrl !== "string" || !rawUrl.trim()) return "";
+
+  try {
+    const parsedUrl = new URL(rawUrl.trim());
+    parsedUrl.protocol = parsedUrl.protocol.toLowerCase();
+    parsedUrl.hostname = parsedUrl.hostname.toLowerCase();
+    parsedUrl.hash = "";
+    parsedUrl.searchParams.sort();
+
+    if (parsedUrl.pathname.length > 1 && parsedUrl.pathname.endsWith("/")) {
+      parsedUrl.pathname = parsedUrl.pathname.slice(0, -1);
+    }
+
+    return parsedUrl.toString();
+  } catch {
+    return rawUrl.trim();
+  }
+};
+
+const parsePositiveInteger = (value, fallback, { min = 1, max = 50 } = {}) => {
+  const parsedValue = Number(value);
+
+  if (!Number.isFinite(parsedValue)) return fallback;
+
+  return Math.min(Math.max(Math.floor(parsedValue), min), max);
+};
+
+const parseNonNegativeSearchInteger = (value, fallback = 0) => {
+  const parsedValue = Number(value);
+
+  if (!Number.isFinite(parsedValue) || parsedValue < 0) return fallback;
+
+  return Math.floor(parsedValue);
+};
+
+const parseSearchBoolean = (value, fallback = false) => {
+  if (value === undefined) return fallback;
+  if (value === true || value === "true" || value === "1") return true;
+  if (value === false || value === "false" || value === "0") return false;
+  return fallback;
+};
+
+const splitImageUrlList = (value) => {
+  if (Array.isArray(value)) return value.flatMap(splitImageUrlList);
+  if (typeof value !== "string") return [];
+
+  const trimmedValue = value.trim();
+  if (!trimmedValue) return [];
+
+  if (trimmedValue.startsWith("[")) {
+    try {
+      const parsedValue = JSON.parse(trimmedValue);
+      return Array.isArray(parsedValue)
+        ? parsedValue.flatMap(splitImageUrlList)
+        : [];
+    } catch {
+      return [trimmedValue];
+    }
+  }
+
+  return trimmedValue.split(",");
+};
+
+const parseExcludedImageUrls = (query) => {
+  const rawValues = [
+    query.excludedImageUrls,
+    query["excludedImageUrls[]"],
+    query.excludedImageUrlsJson,
+    query.excludedImageUrlsCsv,
+  ];
+
+  return new Set(
+    rawValues
+      .flatMap(splitImageUrlList)
+      .map((value) => normalizeImageUrlForComparison(String(value)))
+      .filter(Boolean)
+  );
+};
+
 const isBlockedSearchImageUrl = (rawUrl) => {
   const parsedUrl = getParsedUrl(rawUrl);
   if (!parsedUrl) return true;
@@ -176,11 +256,19 @@ const isRemoteImageAccessible = async (imageUrl) => {
   }
 };
 
-const filterAccessibleImages = async (images) => {
-  const candidates = normalizeImageResults(images).slice(
-    0,
-    IMAGE_SEARCH_VALIDATION_LIMIT
-  );
+const filterAccessibleImages = async (
+  images,
+  {
+    excludedImageUrls = new Set(),
+    limit = IMAGE_SEARCH_LIMIT,
+    avoidDuplicates = true,
+  } = {}
+) => {
+  const candidates = normalizeImageResults(images, {
+    excludedImageUrls,
+    avoidDuplicates,
+    limit: Math.max(IMAGE_SEARCH_VALIDATION_LIMIT, limit * 3),
+  });
   const accessibleImages = [];
 
   for (const image of candidates) {
@@ -190,19 +278,32 @@ const filterAccessibleImages = async (images) => {
       image.thumbnailUrl !== image.url &&
       (await isRemoteImageAccessible(image.thumbnailUrl))
     ) {
-      accessibleImages.push({
-        ...image,
-        url: image.thumbnailUrl,
-      });
+      const normalizedThumbnailUrl = normalizeImageUrlForComparison(
+        image.thumbnailUrl
+      );
+
+      if (!excludedImageUrls.has(normalizedThumbnailUrl)) {
+        accessibleImages.push({
+          ...image,
+          url: image.thumbnailUrl,
+        });
+      }
     }
 
-    if (accessibleImages.length >= IMAGE_SEARCH_LIMIT) break;
+    if (accessibleImages.length >= limit) break;
   }
 
   return accessibleImages;
 };
 
-const normalizeImageResults = (results) => {
+const normalizeImageResults = (
+  results,
+  {
+    excludedImageUrls = new Set(),
+    limit = IMAGE_SEARCH_LIMIT,
+    avoidDuplicates = true,
+  } = {}
+) => {
   const seenUrls = new Set();
 
   return results
@@ -223,18 +324,26 @@ const normalizeImageResults = (results) => {
         !isBlockedSearchImageUrl(image.thumbnailUrl)
     )
     .filter((image) => {
-      if (seenUrls.has(image.url)) return false;
-      seenUrls.add(image.url);
+      const normalizedUrl = normalizeImageUrlForComparison(image.url);
+      const normalizedThumbnailUrl = normalizeImageUrlForComparison(
+        image.thumbnailUrl
+      );
+
+      if (
+        excludedImageUrls.has(normalizedUrl) ||
+        excludedImageUrls.has(normalizedThumbnailUrl)
+      ) {
+        return false;
+      }
+
+      if (avoidDuplicates) {
+        if (seenUrls.has(normalizedUrl)) return false;
+        seenUrls.add(normalizedUrl);
+      }
+
       return true;
     })
-    .slice(0, IMAGE_SEARCH_LIMIT);
-};
-
-const logImageSearch = ({ query, provider, received, images }) => {
-  console.log("[item/image-search] query:", query);
-  console.log("[item/image-search] provider:", provider);
-  console.log("[item/image-search] results received:", received);
-  console.log("[item/image-search] first normalized:", images[0] || null);
+    .slice(0, limit);
 };
 
 const normalizeCategories = (categories) => {
@@ -393,7 +502,10 @@ const uploadExternalImage = async (rawUrl) => {
   }
 };
 
-const searchGoogleImages = async (query) => {
+const searchGoogleImages = async (
+  query,
+  { page = 1, limit = IMAGE_SEARCH_LIMIT } = {}
+) => {
   const response = await axios.get("https://www.googleapis.com/customsearch/v1", {
     timeout: EXTERNAL_IMAGE_TIMEOUT_MS,
     params: {
@@ -402,7 +514,8 @@ const searchGoogleImages = async (query) => {
       q: query,
       searchType: "image",
       safe: "active",
-      num: IMAGE_SEARCH_LIMIT,
+      num: limit,
+      start: Math.min((page - 1) * limit + 1, 91),
     },
   });
   const rawResults = response.data.items || [];
@@ -411,13 +524,17 @@ const searchGoogleImages = async (query) => {
       url: image.link,
       thumbnailUrl: image.image?.thumbnailLink || image.link,
       title: image.title,
-    }))
+    })),
+    { limit }
   );
 
   return { provider: "google-custom-search", rawCount: rawResults.length, images };
 };
 
-const searchBingImages = async (query) => {
+const searchBingImages = async (
+  query,
+  { offset = 0, limit = IMAGE_SEARCH_LIMIT } = {}
+) => {
   const response = await axios.get(
     "https://api.bing.microsoft.com/v7.0/images/search",
     {
@@ -427,7 +544,8 @@ const searchBingImages = async (query) => {
       },
       params: {
         q: query,
-        count: IMAGE_SEARCH_LIMIT,
+        count: limit,
+        offset,
         safeSearch: "Moderate",
       },
     }
@@ -438,13 +556,17 @@ const searchBingImages = async (query) => {
       url: image.contentUrl,
       thumbnailUrl: image.thumbnailUrl,
       title: image.name,
-    }))
+    })),
+    { limit }
   );
 
   return { provider: "bing-image-search", rawCount: rawResults.length, images };
 };
 
-const searchSerpApiImages = async (query) => {
+const searchSerpApiImages = async (
+  query,
+  { page = 1, offset = 0, limit = IMAGE_SEARCH_LIMIT } = {}
+) => {
   const response = await axios.get("https://serpapi.com/search.json", {
     timeout: EXTERNAL_IMAGE_TIMEOUT_MS,
     params: {
@@ -452,7 +574,9 @@ const searchSerpApiImages = async (query) => {
       engine: "google_images",
       q: query,
       safe: "active",
-      num: IMAGE_SEARCH_LIMIT,
+      num: limit,
+      ijn: page - 1,
+      start: offset,
     },
   });
   const rawResults = response.data.images_results || [];
@@ -461,13 +585,17 @@ const searchSerpApiImages = async (query) => {
       url: image.original || image.link || image.thumbnail,
       thumbnailUrl: image.thumbnail || image.original || image.link,
       title: image.title,
-    }))
+    })),
+    { limit }
   );
 
   return { provider: "serpapi-google-images", rawCount: rawResults.length, images };
 };
 
-const searchPexelsImages = async (query) => {
+const searchPexelsImages = async (
+  query,
+  { page = 1, limit = IMAGE_SEARCH_LIMIT } = {}
+) => {
   const response = await axios.get("https://api.pexels.com/v1/search", {
     timeout: EXTERNAL_IMAGE_TIMEOUT_MS,
     headers: {
@@ -475,7 +603,8 @@ const searchPexelsImages = async (query) => {
     },
     params: {
       query,
-      per_page: IMAGE_SEARCH_LIMIT,
+      per_page: limit,
+      page,
       locale: "es-ES",
     },
   });
@@ -485,13 +614,17 @@ const searchPexelsImages = async (query) => {
       url: image.src?.large2x || image.src?.large || image.src?.original,
       thumbnailUrl: image.src?.medium || image.src?.small,
       title: image.alt || image.photographer,
-    }))
+    })),
+    { limit }
   );
 
   return { provider: "pexels", rawCount: rawResults.length, images };
 };
 
-const searchUnsplashImages = async (query) => {
+const searchUnsplashImages = async (
+  query,
+  { page = 1, limit = IMAGE_SEARCH_LIMIT } = {}
+) => {
   const response = await axios.get("https://api.unsplash.com/search/photos", {
     timeout: EXTERNAL_IMAGE_TIMEOUT_MS,
     headers: {
@@ -499,7 +632,8 @@ const searchUnsplashImages = async (query) => {
     },
     params: {
       query,
-      per_page: IMAGE_SEARCH_LIMIT,
+      per_page: limit,
+      page,
       content_filter: "high",
       lang: "es",
     },
@@ -510,13 +644,17 @@ const searchUnsplashImages = async (query) => {
       url: image.urls?.regular || image.urls?.full,
       thumbnailUrl: image.urls?.thumb || image.urls?.small,
       title: image.alt_description || image.description,
-    }))
+    })),
+    { limit }
   );
 
   return { provider: "unsplash", rawCount: rawResults.length, images };
 };
 
-const searchDuckDuckGoImages = async (query) => {
+const searchDuckDuckGoImages = async (
+  query,
+  { offset = 0, limit = IMAGE_SEARCH_LIMIT } = {}
+) => {
   const searchPage = await axios.get("https://duckduckgo.com/", {
     timeout: EXTERNAL_IMAGE_TIMEOUT_MS,
     params: {
@@ -545,6 +683,7 @@ const searchDuckDuckGoImages = async (query) => {
       vqd: tokenMatch[1],
       f: ",,,",
       p: "1",
+      s: offset,
     },
     headers: {
       "User-Agent": "Mozilla/5.0 NotApp/1.0 image-search",
@@ -557,13 +696,17 @@ const searchDuckDuckGoImages = async (query) => {
       url: image.image,
       thumbnailUrl: image.thumbnail || image.image,
       title: image.title,
-    }))
+    })),
+    { limit }
   );
 
   return { provider: "duckduckgo-images", rawCount: rawResults.length, images };
 };
 
-const searchOpenProductsImages = async (query) => {
+const searchOpenProductsImages = async (
+  query,
+  { page = 1, limit = IMAGE_SEARCH_LIMIT } = {}
+) => {
   const endpoints = [
     {
       provider: "open-food-facts",
@@ -591,7 +734,8 @@ const searchOpenProductsImages = async (query) => {
             search_simple: 1,
             action: "process",
             json: 1,
-            page_size: IMAGE_SEARCH_LIMIT,
+            page,
+            page_size: limit,
           },
           headers: {
             "User-Agent": "NotApp/1.0 image-search",
@@ -615,7 +759,8 @@ const searchOpenProductsImages = async (query) => {
                 product.image_thumb_url,
               title:
                 product.product_name || product.generic_name || product.brands,
-            }))
+            })),
+            { limit }
           )
         );
       } catch (error) {
@@ -627,10 +772,10 @@ const searchOpenProductsImages = async (query) => {
         console.error(error.message);
       }
 
-      if (images.length >= IMAGE_SEARCH_LIMIT) break;
+      if (images.length >= limit) break;
     }
 
-    if (images.length >= IMAGE_SEARCH_LIMIT) break;
+    if (images.length >= limit) break;
   }
 
   if (successfulRequests === 0 && lastError) {
@@ -640,57 +785,107 @@ const searchOpenProductsImages = async (query) => {
   return {
     provider: "open-products",
     rawCount,
-    images: normalizeImageResults(images),
+    images: normalizeImageResults(images, { limit }),
   };
 };
 
-const searchProductImages = async ({ name, description, supermarket }) => {
+const searchProductImages = async ({
+  name,
+  description,
+  supermarket,
+  excludedImageUrls = new Set(),
+  page,
+  offset,
+  limit,
+  searchAttempt,
+  avoidDuplicates = true,
+  provider: requestedProvider,
+}) => {
   const query = buildProductImageQuery({ name, description, supermarket });
 
   if (!query) {
-    logImageSearch({ query, provider: "none", received: 0, images: [] });
     return [];
   }
 
+  const excludedCount = excludedImageUrls.size;
+  const searchLimit = parsePositiveInteger(limit, IMAGE_SEARCH_LIMIT, {
+    min: 1,
+    max: 20,
+  });
+  const attempt = parseNonNegativeSearchInteger(searchAttempt);
+  const basePage = parsePositiveInteger(
+    page,
+    Math.floor(excludedCount / searchLimit) + 1,
+    { min: 1, max: 100 }
+  );
+  const baseOffset =
+    offset === undefined
+      ? (basePage - 1) * searchLimit
+      : parseNonNegativeSearchInteger(offset);
+  const searchPage = Math.max(basePage + attempt, 1);
+  const searchOffset = baseOffset + attempt * searchLimit;
   const providers = [];
 
   if (process.env.GOOGLE_SEARCH_API_KEY && process.env.GOOGLE_SEARCH_CX) {
-    providers.push(searchGoogleImages);
+    providers.push({ name: "google-custom-search", search: searchGoogleImages });
   }
   if (process.env.BING_IMAGE_SEARCH_API_KEY) {
-    providers.push(searchBingImages);
+    providers.push({ name: "bing-image-search", search: searchBingImages });
   }
   if (process.env.SERPAPI_API_KEY) {
-    providers.push(searchSerpApiImages);
+    providers.push({ name: "serpapi-google-images", search: searchSerpApiImages });
   }
   if (process.env.PEXELS_API_KEY) {
-    providers.push(searchPexelsImages);
+    providers.push({ name: "pexels", search: searchPexelsImages });
   }
   if (process.env.UNSPLASH_ACCESS_KEY) {
-    providers.push(searchUnsplashImages);
+    providers.push({ name: "unsplash", search: searchUnsplashImages });
   }
 
-  providers.push(searchDuckDuckGoImages);
-  providers.push(searchOpenProductsImages);
+  providers.push({ name: "duckduckgo-images", search: searchDuckDuckGoImages });
+  providers.push({ name: "open-products", search: searchOpenProductsImages });
+
+  const providerFilter =
+    typeof requestedProvider === "string" ? requestedProvider.trim() : "";
+  let activeProviders = providerFilter
+    ? providers.filter((provider) => provider.name === providerFilter)
+    : providers;
+
+  if (activeProviders.length === 0) {
+    activeProviders = providers;
+  }
+
+  if (!providerFilter && activeProviders.length > 1) {
+    const providerOffset = (searchPage + attempt - 1) % activeProviders.length;
+    activeProviders = [
+      ...activeProviders.slice(providerOffset),
+      ...activeProviders.slice(0, providerOffset),
+    ];
+  }
 
   let lastError = null;
   let hadSuccessfulProvider = false;
   let images = [];
 
-  for (const provider of providers) {
+  for (const provider of activeProviders) {
     try {
-      const result = await provider(query);
-      const accessibleImages = await filterAccessibleImages(result.images);
-      hadSuccessfulProvider = true;
-      images = normalizeImageResults([...images, ...accessibleImages]);
-      logImageSearch({
-        query,
-        provider: result.provider,
-        received: result.rawCount,
-        images: accessibleImages,
+      const result = await provider.search(query, {
+        page: searchPage,
+        offset: searchOffset,
+        limit: searchLimit,
       });
-
-      if (images.length >= 4) {
+      const accessibleImages = await filterAccessibleImages(result.images, {
+        excludedImageUrls,
+        limit: searchLimit,
+        avoidDuplicates,
+      });
+      hadSuccessfulProvider = true;
+      images = normalizeImageResults([...images, ...accessibleImages], {
+        excludedImageUrls,
+        limit: searchLimit,
+        avoidDuplicates,
+      });
+      if (images.length >= searchLimit) {
         return images;
       }
     } catch (error) {
@@ -772,18 +967,38 @@ router.post(
 );
 
 router.get("/image-search", authMiddleware, async (req, res) => {
-  const { name, description, supermarket } = req.query;
+  const {
+    name,
+    description,
+    supermarket,
+    page,
+    offset,
+    limit,
+    searchAttempt,
+    avoidDuplicates,
+    provider,
+  } = req.query;
+  const excludedImageUrls = parseExcludedImageUrls(req.query);
 
   try {
     const images = await searchProductImages({
       name,
       description,
       supermarket,
+      excludedImageUrls,
+      page,
+      offset,
+      limit,
+      searchAttempt,
+      avoidDuplicates: parseSearchBoolean(avoidDuplicates, true),
+      provider,
     });
 
     return res.json({
       success: true,
       images,
+      results: images,
+      items: images,
     });
   } catch (error) {
     console.error(error);

@@ -76,6 +76,27 @@ const findValidTutorialHome = async (userId, homeId, tx = prisma) => {
   });
 };
 
+const findAnyTutorialHomeForUser = async (userId, tx = prisma) =>
+  tx.home.findFirst({
+    where: {
+      is_tutorial: true,
+      members: {
+        some: {
+          user_id: userId,
+        },
+        every: {
+          user_id: userId,
+        },
+      },
+    },
+    orderBy: {
+      createdAt: "asc",
+    },
+    select: {
+      id: true,
+    },
+  });
+
 const ensureTutorialHomeFavorite = async (userId, homeId, tx = prisma) =>
   tx.homeFavorite.upsert({
     where: {
@@ -176,10 +197,6 @@ const getOrCreateTutorialHome = async (userId, options = {}) =>
       throw new Error("Usuario no encontrado");
     }
 
-    if (options.recreate) {
-      return createAndAssignTutorialHome(userId, tx);
-    }
-
     const validTutorialHome = await findValidTutorialHome(
       userId,
       user.tutorial_home_id,
@@ -187,10 +204,28 @@ const getOrCreateTutorialHome = async (userId, options = {}) =>
     );
 
     if (validTutorialHome) {
-      return validTutorialHome;
+      return { home: validTutorialHome, reused: true };
     }
 
-    return createAndAssignTutorialHome(userId, tx);
+    const existingTutorialHome = await findAnyTutorialHomeForUser(userId, tx);
+
+    if (existingTutorialHome) {
+      await ensureTutorialHomeFavorite(userId, existingTutorialHome.id, tx);
+      await tx.user.update({
+        where: {
+          id: userId,
+        },
+        data: {
+          tutorial_home_id: existingTutorialHome.id,
+        },
+      });
+
+      return { home: existingTutorialHome, reused: true };
+    }
+
+    const newTutorialHome = await createAndAssignTutorialHome(userId, tx);
+
+    return { home: newTutorialHome, reused: false };
   });
 
 const buildOnboardingResponse = async (userId) => {
@@ -303,13 +338,14 @@ router.post("/tutorial-home", authMiddleware, async (req, res) => {
   if (!userId) return;
 
   try {
-    const tutorialHome = await getOrCreateTutorialHome(userId, {
+    const tutorialHomeResult = await getOrCreateTutorialHome(userId, {
       recreate: req.body?.recreate === true || req.body?.recreate === "true",
     });
 
     return res.json({
       success: true,
-      homeId: tutorialHome.id,
+      homeId: tutorialHomeResult.home.id,
+      reused: tutorialHomeResult.reused,
     });
   } catch (error) {
     console.error(error);

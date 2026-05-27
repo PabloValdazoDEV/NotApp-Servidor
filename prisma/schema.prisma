@@ -132,15 +132,16 @@ model HomeFavorite {
 }
 
 model List {
-  id        String     @id @default(uuid())
-  title     String
-  home_id   String
-  fav       Boolean    @default(false)
-  listCheck Boolean    @default(false)
-  itemsList ItemList[]
-  home      Home       @relation(fields: [home_id], references: [id], onDelete: Cascade)
-  createdAt DateTime?  @default(now())
-  updatedAt DateTime?  @updatedAt
+  id                            String     @id @default(uuid())
+  title                         String
+  home_id                       String
+  fav                           Boolean    @default(false)
+  listCheck                     Boolean    @default(false)
+  copied_from_not_found_list_id String?
+  itemsList                     ItemList[]
+  home                          Home       @relation(fields: [home_id], references: [id], onDelete: Cascade)
+  createdAt                     DateTime?  @default(now())
+  updatedAt                     DateTime?  @updatedAt
 }
 
 model ItemList {
