@@ -74,6 +74,7 @@ io.on("connection", (socket) => {
                   description: true,
                   categories: true,
                   supermarket: true,
+                  is_recurring: true,
                   createdAt: true,
                   updatedAt: true,
                 },

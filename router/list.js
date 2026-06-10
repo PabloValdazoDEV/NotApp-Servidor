@@ -5,6 +5,8 @@ const authMiddleware = require("../middleware/auth.middleware");
 const multer = require("multer");
 const upload = multer({ dest: "uploads/" });
 const cloudinary = require("cloudinary").v2;
+const { DateTime } = require("luxon");
+const { parseExplicitBoolean } = require("../utils/boolean");
 
 const itemSelect = {
   id: true,
@@ -15,6 +17,7 @@ const itemSelect = {
   description: true,
   categories: true,
   supermarket: true,
+  is_recurring: true,
   createdAt: true,
   updatedAt: true,
 };
@@ -57,7 +60,27 @@ const listStatsSelect = {
   },
 };
 
+const listCreateSelect = {
+  id: true,
+  title: true,
+  home_id: true,
+  fav: true,
+  listCheck: true,
+  copied_from_not_found_list_id: true,
+  createdAt: true,
+  updatedAt: true,
+  itemsList: {
+    orderBy: {
+      item: {
+        name: "asc",
+      },
+    },
+    select: itemListSelect,
+  },
+};
+
 const itemListStatuses = ["PENDING", "FOUND", "NOT_FOUND"];
+const LIST_DATE_ZONE = "Europe/Madrid";
 
 const getNotFoundCopyMap = async (lists) => {
   const listIds = lists.map((list) => list.id).filter(Boolean);
@@ -148,29 +171,120 @@ const buildPagination = (page, pageSize, total) => {
   };
 };
 
+const buildAutomaticListTitle = async (tx, homeId) => {
+  const baseTitle = `Compra - ${DateTime.now()
+    .setZone(LIST_DATE_ZONE)
+    .toFormat("dd/MM/yyyy")}`;
+  const existingLists = await tx.list.findMany({
+    where: {
+      home_id: homeId,
+      title: {
+        startsWith: baseTitle,
+      },
+    },
+    select: {
+      title: true,
+    },
+  });
+  const existingTitles = new Set(existingLists.map((list) => list.title));
+
+  if (!existingTitles.has(baseTitle)) return baseTitle;
+
+  let suffix = 2;
+  while (existingTitles.has(`${baseTitle} (${suffix})`)) {
+    suffix += 1;
+  }
+
+  return `${baseTitle} (${suffix})`;
+};
+
 router.post("/create-list", authMiddleware, async (req, res) => {
-  const { title, id_home } = req.body;
-  const titleClean = title.trim();
+  const { title, id_home, include_recurring_items } = req.body;
   try {
-    if (!id_home || !titleClean) {
+    if (!id_home || typeof id_home !== "string") {
       return res.status(400).json({ message: "Faltan datos" });
     }
 
-    const home = await prisma.home.findUnique({ where: { id: id_home } });
+    if (title !== undefined && title !== null && typeof title !== "string") {
+      return res.status(400).json({ message: "El titulo debe ser un texto" });
+    }
+
+    const includeRecurringItems = parseExplicitBoolean(
+      include_recurring_items,
+      false
+    );
+    if (!includeRecurringItems.valid) {
+      return res.status(400).json({
+        message: "include_recurring_items debe ser un valor booleano valido",
+      });
+    }
+
+    const home = await prisma.home.findUnique({
+      where: { id: id_home },
+      select: {
+        id: true,
+        members: {
+          where: {
+            user_id: req.user?.id,
+          },
+          select: {
+            id: true,
+            role: true,
+          },
+        },
+      },
+    });
 
     if (!home) {
       return res.status(400).json({ message: "El hogar no existe" });
     }
 
-    const data = await prisma.list.create({
-      data: {
-        title,
-        home_id: id_home,
-      },
-      select: listStatsSelect,
+    if (!req.user?.id || home.members.length === 0) {
+      return res.status(403).json({
+        message: "No tienes permisos para crear listas en este hogar",
+      });
+    }
+
+    const titleClean = title?.trim();
+    const data = await prisma.$transaction(async (tx) => {
+      const resolvedTitle =
+        titleClean || (await buildAutomaticListTitle(tx, id_home));
+      const recurringItems = includeRecurringItems.value
+        ? await tx.item.findMany({
+            where: {
+              home_id: id_home,
+              is_recurring: true,
+            },
+            select: {
+              id: true,
+            },
+          })
+        : [];
+
+      return tx.list.create({
+        data: {
+          title: resolvedTitle,
+          home_id: id_home,
+          ...(recurringItems.length > 0
+            ? {
+                itemsList: {
+                  create: recurringItems.map((item) => ({
+                    item_id: item.id,
+                    quantity: 1,
+                    purchased_quantity: 0,
+                    check_take: false,
+                    status: "PENDING",
+                  })),
+                },
+              }
+            : {}),
+        },
+        select: listCreateSelect,
+      });
     });
 
     res.json({
+      success: true,
       message: "Lista creada correctamente",
       list: addNotFoundCopyFields(data),
     });
@@ -303,10 +417,50 @@ router.post("/add-item/:id_list", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "Faltan datos" });
     }
 
-    const list = await prisma.list.findUnique({ where: { id: id_list } });
+    const list = await prisma.list.findUnique({
+      where: { id: id_list },
+      select: {
+        id: true,
+        home_id: true,
+        home: {
+          select: {
+            members: {
+              where: {
+                user_id: req.user?.id,
+              },
+              select: {
+                id: true,
+              },
+            },
+          },
+        },
+      },
+    });
 
     if (!list) {
       return res.status(400).json({ message: "La lista no existe" });
+    }
+
+    if (!req.user?.id || list.home.members.length === 0) {
+      return res.status(403).json({
+        message: "No tienes permisos para modificar esta lista",
+      });
+    }
+
+    const item = await prisma.item.findFirst({
+      where: {
+        id: id_item,
+        home_id: list.home_id,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!item) {
+      return res.status(400).json({
+        message: "El producto no pertenece al hogar de la lista",
+      });
     }
 
     const existingItemList = await prisma.itemList.findUnique({

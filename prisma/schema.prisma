@@ -161,18 +161,19 @@ model ItemList {
 }
 
 model Item {
-  id          String      @id @default(uuid())
-  name        String
-  home_id     String
-  image       String?
-  price       String?
-  description String?
-  categories  CATEGORY[]
-  supermarket SUPERMARKET @default(CUALQUIERA)
-  itemsList   ItemList[]
-  home        Home        @relation(fields: [home_id], references: [id], onDelete: Cascade)
-  createdAt   DateTime?   @default(now())
-  updatedAt   DateTime?   @updatedAt
+  id           String      @id @default(uuid())
+  name         String
+  home_id      String
+  image        String?
+  price        String?
+  description  String?
+  categories   CATEGORY[]
+  supermarket  SUPERMARKET @default(CUALQUIERA)
+  is_recurring Boolean     @default(false)
+  itemsList    ItemList[]
+  home         Home        @relation(fields: [home_id], references: [id], onDelete: Cascade)
+  createdAt    DateTime?   @default(now())
+  updatedAt    DateTime?   @updatedAt
 }
 
 model OneTimeToken {

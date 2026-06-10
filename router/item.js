@@ -9,6 +9,7 @@ const { uploadImage } = require("../config/cloudinaryUpload");
 const axios = require("axios");
 const dns = require("dns").promises;
 const net = require("net");
+const { parseExplicitBoolean } = require("../utils/boolean");
 
 const MAX_EXTERNAL_IMAGE_BYTES = 5 * 1024 * 1024;
 const EXTERNAL_IMAGE_TIMEOUT_MS = 7000;
@@ -915,11 +916,20 @@ router.post(
       categories,
       supermarket,
       imageUrl,
+      is_recurring,
     } = req.body;
     try {
       if (!hogar_id || !name) {
         return res.status(400).json({ message: "Faltan datos" });
       }
+
+      const recurringValue = parseExplicitBoolean(is_recurring, false);
+      if (!recurringValue.valid) {
+        return res.status(400).json({
+          message: "is_recurring debe ser un valor booleano valido",
+        });
+      }
+
       const hogar = await prisma.home.findUnique({ where: { id: hogar_id } });
 
       if (!hogar) {
@@ -953,9 +963,14 @@ router.post(
           price,
           categories: normalizedCategories || [],
           supermarket: normalizeSupermarket(supermarket),
+          is_recurring: recurringValue.value,
         },
       });
-      res.json({ message: "Item creado correctamente", item: data });
+      res.json({
+        success: true,
+        message: "Item creado correctamente",
+        item: data,
+      });
     } catch (error) {
       console.error(error);
       if (error instanceof ExternalImageError) {
@@ -1091,6 +1106,7 @@ router.post("/import-from-home", authMiddleware, async (req, res) => {
         categories: true,
         supermarket: true,
         image: true,
+        is_recurring: true,
       },
     });
 
@@ -1108,6 +1124,7 @@ router.post("/import-from-home", authMiddleware, async (req, res) => {
         description: item.description,
         categories: item.categories,
         supermarket: item.supermarket,
+        is_recurring: item.is_recurring,
         image: await duplicateCloudinaryImage(item.image),
       }))
     );
@@ -1144,6 +1161,7 @@ router.post(
       imageDelete,
       supermarket,
       imageUrl,
+      is_recurring,
     } = req.body;
     const categoriesFilter = normalizeCategories(categories);
     const { item_id } = req.params;
@@ -1155,6 +1173,16 @@ router.post(
 
       if (!item) {
         return res.status(400).json({ message: "El producto no existe" });
+      }
+
+      const recurringValue = parseExplicitBoolean(
+        is_recurring,
+        item.is_recurring
+      );
+      if (!recurringValue.valid) {
+        return res.status(400).json({
+          message: "is_recurring debe ser un valor booleano valido",
+        });
       }
 
       if (!(await hasHomeAccess(req.user?.id, item.home_id))) {
@@ -1198,9 +1226,16 @@ router.post(
           ...(supermarket !== undefined
             ? { supermarket: normalizeSupermarket(supermarket) }
             : {}),
+          ...(recurringValue.provided
+            ? { is_recurring: recurringValue.value }
+            : {}),
         },
       });
-      res.json({ message: "Item actualizado correctamente", item: data });
+      res.json({
+        success: true,
+        message: "Item actualizado correctamente",
+        item: data,
+      });
     } catch (error) {
       console.error(error);
       if (error instanceof ExternalImageError) {
@@ -1269,7 +1304,7 @@ router.get("/params/:id_home", authMiddleware, async (req, res) => {
         name
           ? {
               name: {
-                contains: name,
+                contains: name.trim(),
                 mode: "insensitive",
               },
             }
