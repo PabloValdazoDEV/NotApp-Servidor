@@ -25,7 +25,7 @@ const getNotFoundCopyMap = async (lists) => {
   });
 
   return new Map(
-    copies.map((copy) => [copy.copied_from_not_found_list_id, copy.id])
+    copies.map((copy) => [copy.copied_from_not_found_list_id, copy.id]),
   );
 };
 
@@ -82,7 +82,7 @@ router.post(
       console.error(error);
       res.status(500).json({ message: "Server error" });
     }
-  }
+  },
 );
 
 router.get("/user-home/:user_id", authMiddleware, async (req, res) => {
@@ -102,7 +102,7 @@ router.get("/user-home/:user_id", authMiddleware, async (req, res) => {
       select: { home_id: true },
     });
     const favoriteHomeIds = new Set(
-      favorites.map((favorite) => favorite.home_id)
+      favorites.map((favorite) => favorite.home_id),
     );
 
     const homes = await prisma.home.findMany({
@@ -158,7 +158,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
     }
 
     const currentMember = hogar.members.find(
-      (member) => member.user_id === userId
+      (member) => member.user_id === userId,
     );
 
     if (!currentMember) {
@@ -174,6 +174,32 @@ router.get("/:id", authMiddleware, async (req, res) => {
       ...hogar,
       lists: await attachNotFoundCopyFields(hogar.lists),
     });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+router.get("/invitation/:id", authMiddleware, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    if (!id) {
+      return res.status(400).json({ message: "Faltan datos" });
+    }
+
+    const hogar = await prisma.home.findUnique({
+      where: { id },
+      include: {
+        members: true,
+      },
+    });
+
+    if (!hogar) {
+      return res.status(404).json({ message: "El hogar no existe" });
+    }
+
+    res.send(hogar);
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
@@ -355,7 +381,7 @@ router.post(
       console.error(error);
       res.status(500).json({ message: "Server error" });
     }
-  }
+  },
 );
 
 router.delete("/:home_id/favorite", authMiddleware, async (req, res) => {
@@ -408,7 +434,7 @@ router.delete("/:hogar_id", authMiddleware, async (req, res) => {
     }
 
     const ownerMember = hogar.members.find(
-      (member) => member.user_id === userId && member.role === "OWNER"
+      (member) => member.user_id === userId && member.role === "OWNER",
     );
 
     if (!ownerMember) {
