@@ -7,6 +7,97 @@ const upload = multer({ dest: "uploads/" });
 const cloudinary = require("cloudinary").v2;
 const { uploadImage } = require("../config/cloudinaryUpload");
 
+const starterProductCategories = new Set([
+  "FRUTAS_VERDURAS",
+  "LACTEOS",
+  "CARNE",
+  "PESCADO",
+  "BEBIDAS",
+  "PANADERIA",
+  "DESAYUNOS",
+  "CAFE_INFUSIONES",
+  "PASTA_ARROZ_LEGUMBRES",
+  "CONSERVAS",
+  "HUEVOS",
+  "ACEITES_SALSAS_CONDIMENTOS",
+  "CHARCUTERIA",
+  "DULCES",
+  "APERITIVOS",
+  "PLATOS_PREPARADOS",
+  "CONGELADOS",
+  "HIGIENE",
+  "BELLEZA",
+  "LIMPIEZA",
+  "MASCOTAS",
+  "BEBE",
+  "FARMACIA",
+  "OTROS",
+]);
+
+const starterProductSupermarkets = new Set([
+  "CUALQUIERA",
+  "MERCADONA",
+  "AHORRAMAS",
+  "CARREFOUR",
+  "LIDL",
+  "ALDI",
+  "DIA",
+  "ALCAMPO",
+  "EROSKI",
+  "CONSUM",
+  "OTROS",
+]);
+
+const parseInitialItems = (rawItems) => {
+  if (rawItems === undefined || rawItems === null || rawItems === "") return [];
+
+  let parsedItems = rawItems;
+
+  if (typeof rawItems === "string") {
+    try {
+      parsedItems = JSON.parse(rawItems);
+    } catch {
+      throw new Error("initial_items debe ser una lista");
+    }
+  }
+
+  if (!Array.isArray(parsedItems)) {
+    throw new Error("initial_items debe ser una lista");
+  }
+
+  const seenNames = new Set();
+
+  return parsedItems
+    .slice(0, 60)
+    .map((item) => {
+      const name = String(item?.name || "").trim();
+      if (!name) return null;
+
+      const normalizedName = name.toLowerCase();
+      if (seenNames.has(normalizedName)) return null;
+      seenNames.add(normalizedName);
+
+      const categories = Array.isArray(item.categories)
+        ? item.categories
+            .map((category) => String(category).trim())
+            .filter((category) => starterProductCategories.has(category))
+        : [];
+      const supermarket = starterProductSupermarkets.has(item.supermarket)
+        ? item.supermarket
+        : "CUALQUIERA";
+
+      return {
+        name,
+        description: item.description ? String(item.description).trim() : "",
+        price: item.price ? String(item.price).trim() : "",
+        categories,
+        supermarket,
+        is_recurring: Boolean(item.is_recurring),
+      };
+    })
+    .filter(Boolean);
+};
+
 const getNotFoundCopyMap = async (lists) => {
   const listIds = lists.map((list) => list.id).filter(Boolean);
 
@@ -51,12 +142,13 @@ router.post(
   authMiddleware,
   upload.single("file"),
   async (req, res) => {
-    const { user_id, name } = req.body;
+    const { user_id, name, initial_items } = req.body;
 
     try {
       if (!user_id || !name) {
         return res.status(400).json({ message: "Faltan datos" });
       }
+      const initialItems = parseInitialItems(initial_items);
       const image = [];
 
       if (req.file?.path) {
@@ -64,7 +156,7 @@ router.post(
         image.push(result);
       }
 
-      await prisma.home.create({
+      const home = await prisma.home.create({
         data: {
           name: name,
           image: image[0]?.public_id ? image[0]?.public_id : null,
@@ -74,13 +166,31 @@ router.post(
               role: "OWNER",
             },
           },
+          ...(initialItems.length > 0
+            ? {
+                items: {
+                  create: initialItems,
+                },
+              }
+            : {}),
         },
       });
 
-      res.json({ message: "Hogar creado correctamentename" });
+      res.json({
+        success: true,
+        message: "Hogar creado correctamente",
+        home,
+        imported_items_count: initialItems.length,
+      });
     } catch (error) {
       console.error(error);
-      res.status(500).json({ message: "Server error" });
+      res.status(500).json({
+        success: false,
+        message:
+          error.message === "initial_items debe ser una lista"
+            ? error.message
+            : "Server error",
+      });
     }
   },
 );

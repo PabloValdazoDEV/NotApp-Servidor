@@ -370,6 +370,33 @@ const normalizeCategories = (categories) => {
     .filter((category) => category && category !== "0");
 };
 
+const parseStarterImportItems = (rawItems) => {
+  if (!Array.isArray(rawItems)) return [];
+
+  const seenNames = new Set();
+
+  return rawItems
+    .slice(0, 60)
+    .map((item) => {
+      const name = String(item?.name || "").trim();
+      if (!name) return null;
+
+      const normalizedName = name.toLowerCase();
+      if (seenNames.has(normalizedName)) return null;
+      seenNames.add(normalizedName);
+
+      return {
+        name,
+        price: item.price ? String(item.price).trim() : "",
+        description: item.description ? String(item.description).trim() : "",
+        categories: normalizeCategories(item.categories) || [],
+        supermarket: normalizeSupermarket(item.supermarket),
+        is_recurring: Boolean(item.is_recurring),
+      };
+    })
+    .filter(Boolean);
+};
+
 const duplicateCloudinaryImage = async (publicId) => {
   if (!publicId) return null;
   const imageUrl = cloudinary.url(publicId, { secure: true });
@@ -1141,6 +1168,85 @@ router.post("/import-from-home", authMiddleware, async (req, res) => {
       message: "Productos importados correctamente",
       count: items.length,
       items,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+router.post("/import-starter-products", authMiddleware, async (req, res) => {
+  const { target_home_id, items } = req.body;
+  const userId = req.user?.id;
+
+  try {
+    if (!userId || !target_home_id || !Array.isArray(items)) {
+      return res.status(400).json({ message: "Faltan datos" });
+    }
+
+    const targetMember = await prisma.member.findFirst({
+      where: {
+        user_id: userId,
+        home_id: target_home_id,
+        role: {
+          in: ["ADMIN", "OWNER"],
+        },
+      },
+    });
+
+    if (!targetMember) {
+      return res.status(403).json({
+        message: "No tienes permisos para importar productos en este hogar",
+      });
+    }
+
+    const parsedItems = parseStarterImportItems(items);
+
+    if (parsedItems.length === 0) {
+      return res.status(400).json({ message: "Selecciona al menos un producto" });
+    }
+
+    const existingItems = await prisma.item.findMany({
+      where: {
+        home_id: target_home_id,
+      },
+      select: {
+        name: true,
+      },
+    });
+    const existingNames = new Set(
+      existingItems.map((item) => item.name.trim().toLowerCase())
+    );
+    const itemsToCreate = parsedItems
+      .filter((item) => !existingNames.has(item.name.toLowerCase()))
+      .map((item) => ({
+        ...item,
+        home_id: target_home_id,
+      }));
+
+    if (itemsToCreate.length === 0) {
+      return res.json({
+        success: true,
+        message: "Todos esos productos ya estaban en el hogar",
+        count: 0,
+        items: [],
+      });
+    }
+
+    const createdItems = await prisma.$transaction(
+      itemsToCreate.map((item) =>
+        prisma.item.create({
+          data: item,
+        })
+      )
+    );
+
+    return res.json({
+      success: true,
+      message: "Productos básicos importados correctamente",
+      count: createdItems.length,
+      skipped_count: parsedItems.length - createdItems.length,
+      items: createdItems,
     });
   } catch (error) {
     console.error(error);
