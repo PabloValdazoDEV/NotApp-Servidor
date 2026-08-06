@@ -212,6 +212,24 @@ const parseExcludedImageUrls = (query) => {
   );
 };
 
+const parseExcludedItemIds = (query) => {
+  const rawValues = [
+    query.exclude_item_ids,
+    query["exclude_item_ids[]"],
+    query.excludeItemIds,
+    query["excludeItemIds[]"],
+  ];
+
+  return [
+    ...new Set(
+      rawValues
+        .flatMap(splitImageUrlList)
+        .map((value) => String(value).trim())
+        .filter(Boolean)
+    ),
+  ];
+};
+
 const isBlockedSearchImageUrl = (rawUrl) => {
   const parsedUrl = getParsedUrl(rawUrl);
   if (!parsedUrl) return true;
@@ -395,6 +413,77 @@ const parseStarterImportItems = (rawItems) => {
       };
     })
     .filter(Boolean);
+};
+
+const normalizeImportItemNameKey = (value = "") =>
+  String(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ");
+
+const parseMissingListImportItems = (rawItems) => {
+  if (!Array.isArray(rawItems)) return [];
+
+  const groupedItems = new Map();
+
+  rawItems.slice(0, 60).forEach((item) => {
+    const name = String(item?.name || "").trim();
+    if (!name) return;
+
+    const quantity = Math.max(Math.floor(Number(item?.quantity) || 1), 1);
+    const key = normalizeImportItemNameKey(name);
+    const previousItem = groupedItems.get(key);
+
+    groupedItems.set(key, {
+      name: previousItem?.name || name,
+      quantity: (previousItem?.quantity || 0) + quantity,
+    });
+  });
+
+  return [...groupedItems.values()];
+};
+
+const mapWithConcurrency = async (items, limit, mapper) => {
+  const results = [];
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(limit, 1), items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+      }
+    })
+  );
+
+  return results;
+};
+
+const findAndUploadFirstProductImage = async (item) => {
+  try {
+    const images = await searchProductImages({
+      name: item.name,
+      description: item.description,
+      supermarket: item.supermarket,
+      limit: 1,
+      avoidDuplicates: true,
+    });
+
+    if (!images[0]?.url) return null;
+
+    const uploadedImage = await uploadExternalImage(images[0].url);
+    return uploadedImage.public_id || null;
+  } catch (error) {
+    console.error(
+      `[item/starter-import] image lookup failed for ${item.name}:`,
+      error.message
+    );
+    return null;
+  }
 };
 
 const duplicateCloudinaryImage = async (publicId) => {
@@ -1176,7 +1265,7 @@ router.post("/import-from-home", authMiddleware, async (req, res) => {
 });
 
 router.post("/import-starter-products", authMiddleware, async (req, res) => {
-  const { target_home_id, items } = req.body;
+  const { target_home_id, items, include_images } = req.body;
   const userId = req.user?.id;
 
   try {
@@ -1206,46 +1295,109 @@ router.post("/import-starter-products", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "Selecciona al menos un producto" });
     }
 
+    const includeImages = parseExplicitBoolean(include_images, false);
+    if (!includeImages.valid) {
+      return res.status(400).json({
+        message: "include_images debe ser un valor booleano valido",
+      });
+    }
+
     const existingItems = await prisma.item.findMany({
       where: {
         home_id: target_home_id,
       },
       select: {
+        id: true,
         name: true,
+        image: true,
       },
     });
-    const existingNames = new Set(
-      existingItems.map((item) => item.name.trim().toLowerCase())
+    const existingItemsByName = new Map(
+      existingItems.map((item) => [item.name.trim().toLowerCase(), item])
     );
-    const itemsToCreate = parsedItems
-      .filter((item) => !existingNames.has(item.name.toLowerCase()))
-      .map((item) => ({
-        ...item,
-        home_id: target_home_id,
-      }));
+    const itemsToCreate = [];
+    const existingItemsToFillImage = [];
 
-    if (itemsToCreate.length === 0) {
+    parsedItems.forEach((item) => {
+      const existingItem = existingItemsByName.get(item.name.toLowerCase());
+
+      if (!existingItem) {
+        itemsToCreate.push({
+          ...item,
+          home_id: target_home_id,
+        });
+        return;
+      }
+
+      if (includeImages.value && !existingItem.image) {
+        existingItemsToFillImage.push({
+          existingItem,
+          starterItem: item,
+        });
+      }
+    });
+
+    if (itemsToCreate.length === 0 && existingItemsToFillImage.length === 0) {
       return res.json({
         success: true,
         message: "Todos esos productos ya estaban en el hogar",
         count: 0,
+        image_filled_count: 0,
         items: [],
       });
     }
 
-    const createdItems = await prisma.$transaction(
-      itemsToCreate.map((item) =>
+    const itemsWithImages = includeImages.value
+      ? await mapWithConcurrency(itemsToCreate, 3, async (item) => ({
+          ...item,
+          image: await findAndUploadFirstProductImage(item),
+        }))
+      : itemsToCreate;
+    const imageUpdates = includeImages.value
+      ? (
+          await mapWithConcurrency(
+            existingItemsToFillImage,
+            3,
+            async ({ existingItem, starterItem }) => ({
+              id: existingItem.id,
+              image: await findAndUploadFirstProductImage(starterItem),
+            })
+          )
+        ).filter((item) => Boolean(item.image))
+      : [];
+
+    const dbOperations = [
+      ...itemsWithImages.map((item) =>
         prisma.item.create({
           data: item,
         })
-      )
-    );
+      ),
+      ...imageUpdates.map((item) =>
+        prisma.item.update({
+          where: { id: item.id },
+          data: { image: item.image },
+        })
+      ),
+    ];
+    const dbResults =
+      dbOperations.length > 0 ? await prisma.$transaction(dbOperations) : [];
+    const createdItems = dbResults.slice(0, itemsWithImages.length);
+    const updatedImageItems = dbResults.slice(itemsWithImages.length);
+    const message =
+      createdItems.length > 0 && updatedImageItems.length > 0
+        ? "Productos básicos importados y fotos actualizadas correctamente"
+        : createdItems.length > 0
+        ? "Productos básicos importados correctamente"
+        : updatedImageItems.length > 0
+        ? "Fotos de productos básicos actualizadas correctamente"
+        : "Todos esos productos ya estaban en el hogar";
 
     return res.json({
       success: true,
-      message: "Productos básicos importados correctamente",
+      message,
       count: createdItems.length,
       skipped_count: parsedItems.length - createdItems.length,
+      image_filled_count: updatedImageItems.length,
       items: createdItems,
     });
   } catch (error) {
@@ -1253,6 +1405,222 @@ router.post("/import-starter-products", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
+router.post(
+  "/create-missing-list-products",
+  authMiddleware,
+  async (req, res) => {
+    const { hogar_id, list_id, items, include_images } = req.body;
+    const userId = req.user?.id;
+
+    try {
+      if (!userId || !hogar_id || !list_id || !Array.isArray(items)) {
+        return res.status(400).json({ message: "Faltan datos" });
+      }
+
+      const parsedItems = parseMissingListImportItems(items);
+
+      if (parsedItems.length === 0) {
+        return res.status(400).json({ message: "Selecciona al menos un producto" });
+      }
+
+      const includeImages = parseExplicitBoolean(include_images, true);
+      if (!includeImages.valid) {
+        return res.status(400).json({
+          message: "include_images debe ser un valor booleano valido",
+        });
+      }
+
+      const list = await prisma.list.findUnique({
+        where: { id: list_id },
+        select: {
+          id: true,
+          home_id: true,
+        },
+      });
+
+      if (!list || list.home_id !== hogar_id) {
+        return res.status(400).json({ message: "La lista no pertenece al hogar" });
+      }
+
+      if (!(await hasHomeAccess(userId, hogar_id))) {
+        return res.status(403).json({
+          message: "No tienes permisos para crear productos en este hogar",
+        });
+      }
+
+      const existingItems = await prisma.item.findMany({
+        where: {
+          home_id: hogar_id,
+        },
+        select: {
+          id: true,
+          name: true,
+          image: true,
+        },
+      });
+      const existingItemsByName = new Map(
+        existingItems.map((item) => [normalizeImportItemNameKey(item.name), item])
+      );
+      const itemsToCreate = parsedItems.filter(
+        (item) => !existingItemsByName.has(normalizeImportItemNameKey(item.name))
+      );
+      const existingItemsToFillImage = includeImages.value
+        ? parsedItems
+            .map((item) => {
+              const key = normalizeImportItemNameKey(item.name);
+              const existingItem = existingItemsByName.get(key);
+
+              return existingItem && !existingItem.image
+                ? { key, item, existingItem }
+                : null;
+            })
+            .filter(Boolean)
+        : [];
+      const itemsWithImages = includeImages.value
+        ? await mapWithConcurrency(itemsToCreate, 3, async (item) => ({
+            ...item,
+            image: await findAndUploadFirstProductImage({
+              name: item.name,
+              description: "",
+              supermarket: "CUALQUIERA",
+            }),
+          }))
+        : itemsToCreate.map((item) => ({ ...item, image: null }));
+      const existingImageUpdates = includeImages.value
+        ? (
+            await mapWithConcurrency(
+              existingItemsToFillImage,
+              3,
+              async ({ key, item, existingItem }) => ({
+                key,
+                id: existingItem.id,
+                image: await findAndUploadFirstProductImage({
+                  name: item.name,
+                  description: "",
+                  supermarket: "CUALQUIERA",
+                }),
+              })
+            )
+          ).filter((item) => Boolean(item.image))
+        : [];
+
+      const result = await prisma.$transaction(async (tx) => {
+        const itemsByName = new Map(existingItemsByName);
+        let createdItemsCount = 0;
+        let createdItemListsCount = 0;
+        let updatedItemListsCount = 0;
+        let imagesCount = 0;
+
+        for (const imageUpdate of existingImageUpdates) {
+          const updatedItem = await tx.item.update({
+            where: {
+              id: imageUpdate.id,
+            },
+            data: {
+              image: imageUpdate.image,
+            },
+            select: {
+              id: true,
+              name: true,
+              image: true,
+            },
+          });
+
+          imagesCount += 1;
+          itemsByName.set(imageUpdate.key, updatedItem);
+        }
+
+        for (const item of itemsWithImages) {
+          const createdItem = await tx.item.create({
+            data: {
+              home_id: hogar_id,
+              name: item.name,
+              image: item.image,
+              description: "",
+              price: "",
+              categories: [],
+              supermarket: "CUALQUIERA",
+              is_recurring: false,
+            },
+            select: {
+              id: true,
+              name: true,
+              image: true,
+            },
+          });
+
+          createdItemsCount += 1;
+          if (createdItem.image) imagesCount += 1;
+          itemsByName.set(normalizeImportItemNameKey(createdItem.name), createdItem);
+        }
+
+        for (const parsedItem of parsedItems) {
+          const item = itemsByName.get(normalizeImportItemNameKey(parsedItem.name));
+          if (!item?.id) continue;
+
+          const existingItemList = await tx.itemList.findUnique({
+            where: {
+              item_id_list_id: {
+                item_id: item.id,
+                list_id,
+              },
+            },
+            select: {
+              id: true,
+            },
+          });
+
+          if (existingItemList) {
+            await tx.itemList.update({
+              where: {
+                id: existingItemList.id,
+              },
+              data: {
+                quantity: {
+                  increment: parsedItem.quantity,
+                },
+              },
+            });
+            updatedItemListsCount += 1;
+          } else {
+            await tx.itemList.create({
+              data: {
+                item_id: item.id,
+                list_id,
+                quantity: parsedItem.quantity,
+                purchased_quantity: 0,
+                check_take: false,
+                status: "PENDING",
+              },
+            });
+            createdItemListsCount += 1;
+          }
+        }
+
+        return {
+          createdItemsCount,
+          createdItemListsCount,
+          updatedItemListsCount,
+          imagesCount,
+        };
+      });
+
+      return res.json({
+        success: true,
+        message: "Productos no encontrados creados y añadidos correctamente",
+        created_items_count: result.createdItemsCount,
+        item_lists_count:
+          result.createdItemListsCount + result.updatedItemListsCount,
+        updated_item_lists_count: result.updatedItemListsCount,
+        image_count: result.imagesCount,
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
 
 router.post(
   "/:item_id",
@@ -1404,8 +1772,16 @@ router.get("/params/:id_home", authMiddleware, async (req, res) => {
         .json({ message: "No tienes permisos para consultar este hogar" });
     }
 
+    const excludedItemIds = parseExcludedItemIds(req.query);
     const where = {
       home_id: id_home,
+      ...(excludedItemIds.length > 0
+        ? {
+            id: {
+              notIn: excludedItemIds,
+            },
+          }
+        : {}),
       AND: [
         name
           ? {
@@ -1452,3 +1828,5 @@ router.get("/params/:id_home", authMiddleware, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.findAndUploadFirstProductImage = findAndUploadFirstProductImage;
+module.exports.mapWithConcurrency = mapWithConcurrency;

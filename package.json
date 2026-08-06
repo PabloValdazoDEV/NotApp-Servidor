@@ -16,7 +16,7 @@
     "dependencies": {
         "@prisma/client": "^6.8.2",
         "axios": "^1.9.0",
-        "bcrypt": "^5.1.1",
+        "bcrypt": "^6.0.0",
         "cloudinary": "^2.6.1",
         "connect-pg-simple": "^10.0.0",
         "cors": "^2.8.5",
@@ -28,7 +28,7 @@
         "method-override": "^3.0.0",
         "morgan": "^1.10.0",
         "multer": "^1.4.5-lts.2",
-        "nodemailer": "^6.10.1",
+        "nodemailer": "^9.0.4",
         "passport": "^0.7.0",
         "passport-local": "^1.0.0",
         "pg": "^8.13.3",

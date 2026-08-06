@@ -6,6 +6,11 @@ const multer = require("multer");
 const upload = multer({ dest: "uploads/" });
 const cloudinary = require("cloudinary").v2;
 const { uploadImage } = require("../config/cloudinaryUpload");
+const { parseExplicitBoolean } = require("../utils/boolean");
+const {
+  findAndUploadFirstProductImage,
+  mapWithConcurrency,
+} = require("./item");
 
 const starterProductCategories = new Set([
   "FRUTAS_VERDURAS",
@@ -142,13 +147,32 @@ router.post(
   authMiddleware,
   upload.single("file"),
   async (req, res) => {
-    const { user_id, name, initial_items } = req.body;
+    const { user_id, name, initial_items, include_initial_item_images } =
+      req.body;
 
     try {
       if (!user_id || !name) {
         return res.status(400).json({ message: "Faltan datos" });
       }
+      const includeInitialItemImages = parseExplicitBoolean(
+        include_initial_item_images,
+        false
+      );
+      if (!includeInitialItemImages.valid) {
+        return res.status(400).json({
+          message:
+            "include_initial_item_images debe ser un valor booleano valido",
+        });
+      }
+
       const initialItems = parseInitialItems(initial_items);
+      const initialItemsWithImages =
+        includeInitialItemImages.value && initialItems.length > 0
+          ? await mapWithConcurrency(initialItems, 3, async (item) => ({
+              ...item,
+              image: await findAndUploadFirstProductImage(item),
+            }))
+          : initialItems;
       const image = [];
 
       if (req.file?.path) {
@@ -169,7 +193,7 @@ router.post(
           ...(initialItems.length > 0
             ? {
                 items: {
-                  create: initialItems,
+                  create: initialItemsWithImages,
                 },
               }
             : {}),
@@ -180,7 +204,7 @@ router.post(
         success: true,
         message: "Hogar creado correctamente",
         home,
-        imported_items_count: initialItems.length,
+        imported_items_count: initialItemsWithImages.length,
       });
     } catch (error) {
       console.error(error);

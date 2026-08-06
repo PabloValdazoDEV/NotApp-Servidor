@@ -3,7 +3,22 @@ const router = express.Router();
 const prisma = require("../prisma/prisma");
 const authMiddleware = require("../middleware/auth.middleware");
 
-const CURRENT_ONBOARDING_VERSION = 1;
+const CURRENT_ONBOARDING_VERSION = 2;
+
+const tutorialHomeSelect = {
+  id: true,
+  lists: {
+    orderBy: {
+      createdAt: "asc",
+    },
+    take: 1,
+    select: {
+      id: true,
+    },
+  },
+};
+
+const getTutorialListId = (home) => home?.lists?.[0]?.id || null;
 
 const tutorialItems = [
   {
@@ -70,9 +85,7 @@ const findValidTutorialHome = async (userId, homeId, tx = prisma) => {
         },
       },
     },
-    select: {
-      id: true,
-    },
+    select: tutorialHomeSelect,
   });
 };
 
@@ -92,9 +105,7 @@ const findAnyTutorialHomeForUser = async (userId, tx = prisma) =>
     orderBy: {
       createdAt: "asc",
     },
-    select: {
-      id: true,
-    },
+    select: tutorialHomeSelect,
   });
 
 const ensureTutorialHomeFavorite = async (userId, homeId, tx = prisma) =>
@@ -163,7 +174,10 @@ const createTutorialHome = async (userId, tx) => {
     });
   }
 
-  return home;
+  return {
+    ...home,
+    lists: [{ id: list.id }],
+  };
 };
 
 const createAndAssignTutorialHome = async (userId, tx) => {
@@ -267,6 +281,7 @@ const buildOnboardingResponse = async (userId) => {
     completedAt: user.onboarding_completed_at,
     version: user.onboarding_version || CURRENT_ONBOARDING_VERSION,
     tutorialHomeId: tutorialHome?.id || null,
+    tutorialListId: getTutorialListId(tutorialHome),
     installPromptCompletedAt: user.install_prompt_completed_at,
     installPromptSkippedAt: user.install_prompt_skipped_at,
   };
@@ -345,6 +360,7 @@ router.post("/tutorial-home", authMiddleware, async (req, res) => {
     return res.json({
       success: true,
       homeId: tutorialHomeResult.home.id,
+      listId: getTutorialListId(tutorialHomeResult.home),
       reused: tutorialHomeResult.reused,
     });
   } catch (error) {
