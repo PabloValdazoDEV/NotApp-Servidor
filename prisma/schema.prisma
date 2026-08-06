@@ -60,6 +60,11 @@ enum SUPERMARKET {
   OTROS
 }
 
+enum MENU_MEAL_TYPE {
+  COMIDA
+  CENA
+}
+
 model User {
   id                          String         @id @default(uuid())
   email                       String         @unique
@@ -114,6 +119,8 @@ model Home {
   members     Member[]
   invitations Invitation[]
   favoriteBy  HomeFavorite[]
+  menuTokens  MenuPublicToken[]
+  weeklyMenus WeeklyMenu[]
   lists       List[]
   items       Item[]
   createdAt   DateTime       @default(now())
@@ -174,6 +181,50 @@ model Item {
   home         Home        @relation(fields: [home_id], references: [id], onDelete: Cascade)
   createdAt    DateTime?   @default(now())
   updatedAt    DateTime?   @updatedAt
+}
+
+model WeeklyMenu {
+  id                 String     @id @default(uuid())
+  home_id            String
+  week_start         DateTime   @db.Date
+  created_by_user_id String?
+  meals              MenuMeal[]
+  home               Home       @relation(fields: [home_id], references: [id], onDelete: Cascade)
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  @@unique([home_id, week_start])
+  @@index([home_id, week_start])
+}
+
+model MenuMeal {
+  id             String         @id @default(uuid())
+  weekly_menu_id String
+  day_date       DateTime       @db.Date
+  type           MENU_MEAL_TYPE
+  title          String?
+  notes          String?
+  weeklyMenu     WeeklyMenu     @relation(fields: [weekly_menu_id], references: [id], onDelete: Cascade)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@unique([weekly_menu_id, day_date, type])
+  @@index([day_date])
+}
+
+model MenuPublicToken {
+  id         String    @id @default(uuid())
+  home_id    String
+  token      String?
+  token_hash String    @unique
+  name       String?
+  revokedAt  DateTime?
+  home       Home      @relation(fields: [home_id], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([home_id, revokedAt])
+  @@index([token])
 }
 
 model OneTimeToken {

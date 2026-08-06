@@ -7,6 +7,7 @@ const upload = multer({ dest: "uploads/" });
 const cloudinary = require("cloudinary").v2;
 const { uploadImage } = require("../config/cloudinaryUpload");
 const { parseExplicitBoolean } = require("../utils/boolean");
+const { HOME_ADMIN_ROLES, getAccessibleHome } = require("../utils/permissions");
 const {
   findAndUploadFirstProductImage,
   mapWithConcurrency,
@@ -149,10 +150,16 @@ router.post(
   async (req, res) => {
     const { user_id, name, initial_items, include_initial_item_images } =
       req.body;
+    const authenticatedUserId = req.user?.id;
 
     try {
-      if (!user_id || !name) {
+      if (!authenticatedUserId || !user_id || !name) {
         return res.status(400).json({ message: "Faltan datos" });
+      }
+      if (user_id !== authenticatedUserId) {
+        return res.status(403).json({
+          message: "No puedes crear un hogar para otro usuario",
+        });
       }
       const includeInitialItemImages = parseExplicitBoolean(
         include_initial_item_images,
@@ -186,7 +193,7 @@ router.post(
           image: image[0]?.public_id ? image[0]?.public_id : null,
           members: {
             create: {
-              user_id: user_id,
+              user_id: authenticatedUserId,
               role: "OWNER",
             },
           },
@@ -224,6 +231,11 @@ router.get("/user-home/:user_id", authMiddleware, async (req, res) => {
   try {
     if (!user_id) {
       return res.status(400).json({ message: "Faltan datos" });
+    }
+    if (req.user?.id !== user_id) {
+      return res.status(403).json({
+        message: "No tienes permisos para consultar estos hogares",
+      });
     }
     const user = await prisma.user.findUnique({ where: { id: user_id } });
 
@@ -316,10 +328,55 @@ router.get("/:id", authMiddleware, async (req, res) => {
 
 router.get("/invitation/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
+  const userId = req.user?.id;
+  const userEmail = String(req.user?.email || "").trim();
 
   try {
-    if (!id) {
+    if (!id || !userId) {
       return res.status(400).json({ message: "Faltan datos" });
+    }
+
+    const canPreviewHome = await prisma.home.findFirst({
+      where: {
+        id,
+        OR: [
+          {
+            members: {
+              some: {
+                user_id: userId,
+              },
+            },
+          },
+          {
+            invitations: {
+              some: {
+                OR: [
+                  { user_id: userId },
+                  ...(userEmail
+                    ? [
+                        {
+                          email: {
+                            equals: userEmail,
+                            mode: "insensitive",
+                          },
+                        },
+                      ]
+                    : []),
+                ],
+              },
+            },
+          },
+        ],
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!canPreviewHome) {
+      return res.status(403).json({
+        message: "No tienes permisos para consultar esta invitación",
+      });
     }
 
     const hogar = await prisma.home.findUnique({
@@ -475,10 +532,19 @@ router.post(
       if (!hogar_id) {
         return res.status(400).json({ message: "Faltan datos" });
       }
-      const hogar = await prisma.home.findUnique({ where: { id: hogar_id } });
+      const hogar = await getAccessibleHome(req.user?.id, hogar_id, {
+        roles: HOME_ADMIN_ROLES,
+        select: {
+          id: true,
+          name: true,
+          image: true,
+        },
+      });
 
       if (!hogar) {
-        return res.status(400).json({ message: "El hogar no existe" });
+        return res.status(403).json({
+          message: "No tienes permisos para editar este hogar",
+        });
       }
       const image = [];
 

@@ -16,6 +16,11 @@ router.get("/:id_user", authMiddleware, async (req, res) => {
         message: "Faltan datos",
       });
     }
+    if (req.user?.id !== id_user) {
+      return res.status(403).json({
+        message: "No tienes permisos para consultar este perfil",
+      });
+    }
     const user = await prisma.user.findUnique({
       where: {
         id: id_user,
@@ -57,6 +62,11 @@ router.post(
       if (!id_user) {
         return res.status(400).json({
           message: "Faltan datos",
+        });
+      }
+      if (req.user?.id !== id_user) {
+        return res.status(403).json({
+          message: "No tienes permisos para editar este perfil",
         });
       }
       const user = await prisma.user.findUnique({

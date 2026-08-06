@@ -7,6 +7,12 @@ const upload = multer({ dest: "uploads/" });
 const cloudinary = require("cloudinary").v2;
 const { DateTime } = require("luxon");
 const { parseExplicitBoolean } = require("../utils/boolean");
+const {
+  getAccessibleHome,
+  getAccessibleItemList,
+  getAccessibleList,
+  getAccessibleListInHome,
+} = require("../utils/permissions");
 
 const itemSelect = {
   id: true,
@@ -149,6 +155,11 @@ const parseNonNegativeInteger = (value) => {
   return Number.isInteger(parsedValue) && parsedValue >= 0 ? parsedValue : null;
 };
 
+const parsePositiveInteger = (value) => {
+  const parsedValue = Number(value);
+  return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : null;
+};
+
 const getPaginationParams = (query) => {
   const page = Math.max(Number(query.page) || 1, 1);
   const pageSize = Math.max(Number(query.pageSize || query.limit) || 10, 1);
@@ -219,27 +230,13 @@ router.post("/create-list", authMiddleware, async (req, res) => {
       });
     }
 
-    const home = await prisma.home.findUnique({
-      where: { id: id_home },
+    const home = await getAccessibleHome(req.user?.id, id_home, {
       select: {
         id: true,
-        members: {
-          where: {
-            user_id: req.user?.id,
-          },
-          select: {
-            id: true,
-            role: true,
-          },
-        },
       },
     });
 
     if (!home) {
-      return res.status(400).json({ message: "El hogar no existe" });
-    }
-
-    if (!req.user?.id || home.members.length === 0) {
       return res.status(403).json({
         message: "No tienes permisos para crear listas en este hogar",
       });
@@ -307,8 +304,7 @@ router.post(
         return res.status(400).json({ message: "Faltan datos" });
       }
 
-      const sourceList = await prisma.list.findUnique({
-        where: { id: id_list },
+      const sourceList = await getAccessibleList(req.user?.id, id_list, {
         select: {
           id: true,
           home_id: true,
@@ -316,7 +312,9 @@ router.post(
       });
 
       if (!sourceList) {
-        return res.status(400).json({ message: "La lista origen no existe" });
+        return res.status(403).json({
+          message: "No tienes permisos para consultar esta lista",
+        });
       }
 
       const existingCopy = await prisma.list.findFirst({
@@ -417,34 +415,23 @@ router.post("/add-item/:id_list", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "Faltan datos" });
     }
 
-    const list = await prisma.list.findUnique({
-      where: { id: id_list },
+    const list = await getAccessibleList(req.user?.id, id_list, {
       select: {
         id: true,
         home_id: true,
-        home: {
-          select: {
-            members: {
-              where: {
-                user_id: req.user?.id,
-              },
-              select: {
-                id: true,
-              },
-            },
-          },
-        },
       },
     });
 
     if (!list) {
-      return res.status(400).json({ message: "La lista no existe" });
-    }
-
-    if (!req.user?.id || list.home.members.length === 0) {
       return res.status(403).json({
         message: "No tienes permisos para modificar esta lista",
       });
+    }
+
+    const nextQuantity =
+      quantity === undefined ? undefined : parsePositiveInteger(quantity);
+    if (quantity !== undefined && nextQuantity === null) {
+      return res.status(400).json({ message: "La cantidad no es valida" });
     }
 
     const item = await prisma.item.findFirst({
@@ -485,7 +472,7 @@ router.post("/add-item/:id_list", authMiddleware, async (req, res) => {
       data: {
         item_id: id_item,
         list_id: id_list,
-        quantity: quantity === undefined ? undefined : +quantity,
+        quantity: nextQuantity,
         purchased_quantity: 0,
       },
       select: itemListSelect,
@@ -510,16 +497,18 @@ router.post("/add-item/:id_list", authMiddleware, async (req, res) => {
 router.post("/update-list/:id_list", authMiddleware, async (req, res) => {
   const { id_list } = req.params;
   const { title } = req.body;
-  const titleClean = title.trim();
+  const titleClean = typeof title === "string" ? title.trim() : "";
   try {
-    if (!id_list) {
+    if (!id_list || !titleClean) {
       return res.status(400).json({ message: "Faltan datos" });
     }
 
-    const list = await prisma.list.findUnique({ where: { id: id_list } });
+    const list = await getAccessibleList(req.user?.id, id_list);
 
     if (!list) {
-      return res.status(400).json({ message: "La lista no existe" });
+      return res.status(403).json({
+        message: "No tienes permisos para modificar esta lista",
+      });
     }
     await prisma.list.update({
       where: {
@@ -550,17 +539,31 @@ router.post(
         return res.status(400).json({ message: "Faltan datos" });
       }
 
-      const itemList = await prisma.itemList.findUnique({
-        where: { id: id_itemList },
+      const itemList = await getAccessibleItemList(req.user?.id, id_itemList, {
+        select: {
+          id: true,
+          item_id: true,
+          list_id: true,
+          quantity: true,
+          purchased_quantity: true,
+          check_take: true,
+          status: true,
+        },
       });
 
       if (!itemList) {
-        return res.status(400).json({ message: "El producto no existe" });
+        return res.status(403).json({
+          message: "No tienes permisos para modificar este producto",
+        });
       }
 
       const data = {};
       if (quantity !== undefined) {
-        const nextQuantity = +quantity;
+        const nextQuantity = parsePositiveInteger(quantity);
+        if (nextQuantity === null) {
+          return res.status(400).json({ message: "La cantidad no es valida" });
+        }
+
         if (itemList.quantity !== nextQuantity) data.quantity = nextQuantity;
       }
       if (purchased_quantity !== undefined) {
@@ -660,11 +663,25 @@ router.delete(
         return res.status(400).json({ message: "Faltan datos" });
       }
 
-      const itemList = await prisma.itemList.findUnique({
-        where: { id: id_itemList },
+      const itemList = await getAccessibleItemList(req.user?.id, id_itemList, {
+        select: {
+          id: true,
+          list_id: true,
+        },
       });
 
       if (!itemList) {
+        const existingItemList = await prisma.itemList.findUnique({
+          where: { id: id_itemList },
+          select: { id: true },
+        });
+
+        if (existingItemList) {
+          return res.status(403).json({
+            message: "No tienes permisos para eliminar este producto",
+          });
+        }
+
         return res.json({
           message: "Producto ya eliminado",
           itemList: {
@@ -708,10 +725,12 @@ router.delete("/delete-list/:id_list", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "Faltan datos" });
     }
 
-    const list = await prisma.list.findUnique({ where: { id: id_list } });
+    const list = await getAccessibleList(req.user?.id, id_list);
 
     if (!list) {
-      return res.status(400).json({ message: "La lista no existe" });
+      return res.status(403).json({
+        message: "No tienes permisos para eliminar esta lista",
+      });
     }
     await prisma.list.delete({
       where: {
@@ -735,10 +754,12 @@ router.get("/params/items/:id_list", authMiddleware, async (req, res) => {
     if (!id_list) {
       return res.status(400).json({ message: "Faltan datos" });
     }
-    const list = await prisma.list.findUnique({ where: { id: id_list } });
+    const list = await getAccessibleList(req.user?.id, id_list);
 
     if (!list) {
-      return res.status(400).json({ message: "No existe ese hogar" });
+      return res.status(403).json({
+        message: "No tienes permisos para consultar esta lista",
+      });
     }
 
     const where = {
@@ -787,10 +808,12 @@ router.get("/params/:id_home", authMiddleware, async (req, res) => {
     if (!id_home) {
       return res.status(400).json({ message: "Faltan datos" });
     }
-    const home = await prisma.home.findUnique({ where: { id: id_home } });
+    const home = await getAccessibleHome(req.user?.id, id_home);
 
     if (!home) {
-      return res.status(400).json({ message: "No existe ese hogar" });
+      return res.status(403).json({
+        message: "No tienes permisos para consultar este hogar",
+      });
     }
 
     const lists = await prisma.list.findMany({
@@ -846,9 +869,14 @@ router.get("/home/:id_home", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "Faltan datos" });
     }
 
-    const home = await prisma.home.findUnique({
-      where: { id: id_home },
-      include: {
+    const home = await getAccessibleHome(req.user?.id, id_home, {
+      select: {
+        id: true,
+        name: true,
+        image: true,
+        is_tutorial: true,
+        createdAt: true,
+        updatedAt: true,
         lists: {
           orderBy: {
             title: "asc",
@@ -866,7 +894,9 @@ router.get("/home/:id_home", authMiddleware, async (req, res) => {
     });
 
     if (!home) {
-      return res.status(400).json({ message: "No hay lista en el hogar" });
+      return res.status(403).json({
+        message: "No tienes permisos para consultar este hogar",
+      });
     }
     res.send({
       ...home,
@@ -887,24 +917,16 @@ router.get("/:id_home/:id_list", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "Faltan datos" });
     }
 
-    const exist = await prisma.home.findFirst({
-      where: {
-        id: id_home,
-        lists: {
-          some: { id: id_list },
-        },
-      },
+    const listAccess = await getAccessibleListInHome(req.user?.id, id_home, id_list, {
       select: {
-        lists: {
-          where: {
-            id: id_list,
-          },
-        },
+        id: true,
       },
     });
 
-    if (exist === null) {
-      return res.status(400).json({ message: "Error al busca la lista." });
+    if (!listAccess) {
+      return res.status(403).json({
+        message: "No tienes permisos para consultar esta lista",
+      });
     }
 
     const list = await prisma.itemList.findMany({

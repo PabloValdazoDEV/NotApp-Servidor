@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const http = require("http");
@@ -7,9 +8,10 @@ const PORT = 3000;
 const router = require("./router");
 const methodOverride = require("method-override");
 const corsConfig = require('./config/corsConfig')
-require("dotenv").config();
 const cloudinary = require('cloudinary').v2;
 const prisma = require("./prisma/prisma");
+const jwt = require("jsonwebtoken");
+const { getAccessibleList } = require("./utils/permissions");
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: corsConfig,
@@ -33,15 +35,29 @@ app.use(methodOverride("_method"));
 
 app.use("/", router);
 
+io.use((socket, next) => {
+  const authToken = socket.handshake.auth?.token;
+  const headerToken = socket.handshake.headers?.authorization?.split(" ")[1];
+  const token = authToken || headerToken;
+
+  if (!token) {
+    return next(new Error("No se proporcionó token de autenticación"));
+  }
+
+  try {
+    socket.user = jwt.verify(token, process.env.JWT_SECRET);
+    return next();
+  } catch {
+    return next(new Error("Token inválido o expirado"));
+  }
+});
+
 io.on("connection", (socket) => {
   socket.on("list:join", async ({ list_id } = {}) => {
     if (!list_id) return;
 
-    socket.join(`list:${list_id}`);
-
     try {
-      const list = await prisma.list.findUnique({
-        where: { id: list_id },
+      const list = await getAccessibleList(socket.user?.id, list_id, {
         select: {
           id: true,
           title: true,
@@ -83,6 +99,16 @@ io.on("connection", (socket) => {
           },
         },
       });
+
+      if (!list) {
+        socket.emit("list:error", {
+          list_id,
+          message: "No tienes permisos para sincronizar esta lista",
+        });
+        return;
+      }
+
+      socket.join(`list:${list_id}`);
 
       const notFoundCopyList = list
         ? await prisma.list.findFirst({
