@@ -172,6 +172,9 @@ router.get("/me", authMiddleware, async (req, res) => {
         name: true,
         id: true,
         image:true,
+        plan: true,
+        premium_home_slots: true,
+        premium_expires_at: true,
         invitations:true
       },
     });
@@ -313,7 +316,18 @@ router.get("/check-token/:token", async (req, res) => {
         return res.status(400).json({ message: "Token invalido" });
       }
   
-      res.json({ message: "Token valido" });
+      let decodedToken = {};
+      try {
+        decodedToken = jwt.verify(token, process.env.JWT_SECRET);
+      } catch (error) {
+        return res.status(400).json({ message: "Token invalido" });
+      }
+
+      res.json({
+        message: "Token valido",
+        purpose: tokenValidate.purpose,
+        email: decodedToken.email || null,
+      });
     } catch (error) {
       console.error(error);
       res.status(500).json({ message: "Server error" });

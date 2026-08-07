@@ -10,6 +10,10 @@ const axios = require("axios");
 const dns = require("dns").promises;
 const net = require("net");
 const { parseExplicitBoolean } = require("../utils/boolean");
+const {
+  canAddProductImages,
+  getHomeProductImageUsage,
+} = require("../utils/plans");
 
 const MAX_EXTERNAL_IMAGE_BYTES = 5 * 1024 * 1024;
 const EXTERNAL_IMAGE_TIMEOUT_MS = 7000;
@@ -26,6 +30,47 @@ const BLOCKED_IMAGE_HOST_PARTS = ["escroq.com", "bolder.run"];
 const BLOCKED_IMAGE_PATH_PARTS = ["buy-domain", "domain-for-sale"];
 
 class ExternalImageError extends Error {}
+
+const getImageLimitMessage = (usage) =>
+  `Este hogar ha alcanzado el límite de ${usage.maxProductImages} fotos de producto del plan ${usage.plan}.`;
+
+const getAutoImageImportPlan = async (homeId, includeImages) => {
+  const usage = await getHomeProductImageUsage(homeId);
+
+  if (!includeImages) {
+    return {
+      enabled: false,
+      budget: 0,
+      usage,
+      warning: null,
+    };
+  }
+
+  if (!usage.autoImageImportEnabled) {
+    return {
+      enabled: false,
+      budget: 0,
+      usage,
+      warning:
+        "La búsqueda automática de fotos está disponible solo en hogares premium.",
+    };
+  }
+
+  const budget = Math.min(
+    usage.availableProductImages,
+    usage.maxAutoImageLookupsPerRequest
+  );
+
+  return {
+    enabled: budget > 0,
+    budget,
+    usage,
+    warning:
+      budget > 0
+        ? null
+        : getImageLimitMessage(usage),
+  };
+};
 
 const supermarkets = [
   "CUALQUIERA",
@@ -1058,6 +1103,17 @@ router.post(
         });
       }
 
+      if (req.file?.path || imageUrl) {
+        const imageAllowance = await canAddProductImages(hogar_id, 1);
+        if (!imageAllowance.allowed) {
+          return res.status(403).json({
+            success: false,
+            message: getImageLimitMessage(imageAllowance),
+            limits: imageAllowance,
+          });
+        }
+      }
+
       const image = [];
 
       if (req.file?.path) {
@@ -1232,6 +1288,19 @@ router.post("/import-from-home", authMiddleware, async (req, res) => {
       });
     }
 
+    const sourceItemsWithImages = sourceItems.filter((item) => Boolean(item.image));
+    const targetImageImportPlan = await getAutoImageImportPlan(
+      target_home_id,
+      sourceItemsWithImages.length > 0
+    );
+    const itemsAllowedToDuplicateImage = new Set(
+      targetImageImportPlan.enabled
+        ? sourceItemsWithImages
+            .slice(0, targetImageImportPlan.budget)
+            .map((item) => item.id)
+        : []
+    );
+
     const duplicatedItems = await Promise.all(
       sourceItems.map(async (item) => ({
         name: item.name,
@@ -1241,9 +1310,12 @@ router.post("/import-from-home", authMiddleware, async (req, res) => {
         categories: item.categories,
         supermarket: item.supermarket,
         is_recurring: item.is_recurring,
-        image: await duplicateCloudinaryImage(item.image),
+        image: itemsAllowedToDuplicateImage.has(item.id)
+          ? await duplicateCloudinaryImage(item.image)
+          : null,
       }))
     );
+    const copiedImagesCount = duplicatedItems.filter((item) => item.image).length;
 
     const items = await prisma.$transaction(
       duplicatedItems.map((item) =>
@@ -1256,6 +1328,10 @@ router.post("/import-from-home", authMiddleware, async (req, res) => {
     return res.json({
       message: "Productos importados correctamente",
       count: items.length,
+      image_count: copiedImagesCount,
+      image_skipped_count: sourceItemsWithImages.length - copiedImagesCount,
+      limits: targetImageImportPlan.usage,
+      warning: targetImageImportPlan.warning,
       items,
     });
   } catch (error) {
@@ -1347,16 +1423,29 @@ router.post("/import-starter-products", authMiddleware, async (req, res) => {
       });
     }
 
-    const itemsWithImages = includeImages.value
-      ? await mapWithConcurrency(itemsToCreate, 3, async (item) => ({
+    const imageImportPlan = await getAutoImageImportPlan(
+      target_home_id,
+      includeImages.value
+    );
+    const createImageBudget = imageImportPlan.enabled
+      ? Math.min(itemsToCreate.length, imageImportPlan.budget)
+      : 0;
+    const updateImageBudget = imageImportPlan.enabled
+      ? Math.max(imageImportPlan.budget - createImageBudget, 0)
+      : 0;
+    const itemsWithImages = imageImportPlan.enabled
+      ? await mapWithConcurrency(itemsToCreate, 3, async (item, index) => ({
           ...item,
-          image: await findAndUploadFirstProductImage(item),
+          image:
+            index < createImageBudget
+              ? await findAndUploadFirstProductImage(item)
+              : null,
         }))
-      : itemsToCreate;
-    const imageUpdates = includeImages.value
+      : itemsToCreate.map((item) => ({ ...item, image: null }));
+    const imageUpdates = imageImportPlan.enabled
       ? (
           await mapWithConcurrency(
-            existingItemsToFillImage,
+            existingItemsToFillImage.slice(0, updateImageBudget),
             3,
             async ({ existingItem, starterItem }) => ({
               id: existingItem.id,
@@ -1398,6 +1487,21 @@ router.post("/import-starter-products", authMiddleware, async (req, res) => {
       count: createdItems.length,
       skipped_count: parsedItems.length - createdItems.length,
       image_filled_count: updatedImageItems.length,
+      image_count:
+        createdItems.filter((item) => Boolean(item.image)).length +
+        updatedImageItems.length,
+      image_skipped_count:
+        includeImages.value && !imageImportPlan.enabled
+          ? itemsToCreate.length + existingItemsToFillImage.length
+          : Math.max(
+              itemsToCreate.length +
+                existingItemsToFillImage.length -
+                createImageBudget -
+                updateImageBudget,
+              0
+            ),
+      limits: imageImportPlan.usage,
+      warning: imageImportPlan.warning,
       items: createdItems,
     });
   } catch (error) {
@@ -1424,7 +1528,7 @@ router.post(
         return res.status(400).json({ message: "Selecciona al menos un producto" });
       }
 
-      const includeImages = parseExplicitBoolean(include_images, true);
+      const includeImages = parseExplicitBoolean(include_images, false);
       if (!includeImages.valid) {
         return res.status(400).json({
           message: "include_images debe ser un valor booleano valido",
@@ -1477,20 +1581,33 @@ router.post(
             })
             .filter(Boolean)
         : [];
-      const itemsWithImages = includeImages.value
-        ? await mapWithConcurrency(itemsToCreate, 3, async (item) => ({
+      const imageImportPlan = await getAutoImageImportPlan(
+        hogar_id,
+        includeImages.value
+      );
+      const createImageBudget = imageImportPlan.enabled
+        ? Math.min(itemsToCreate.length, imageImportPlan.budget)
+        : 0;
+      const updateImageBudget = imageImportPlan.enabled
+        ? Math.max(imageImportPlan.budget - createImageBudget, 0)
+        : 0;
+      const itemsWithImages = imageImportPlan.enabled
+        ? await mapWithConcurrency(itemsToCreate, 3, async (item, index) => ({
             ...item,
-            image: await findAndUploadFirstProductImage({
-              name: item.name,
-              description: "",
-              supermarket: "CUALQUIERA",
-            }),
+            image:
+              index < createImageBudget
+                ? await findAndUploadFirstProductImage({
+                    name: item.name,
+                    description: "",
+                    supermarket: "CUALQUIERA",
+                  })
+                : null,
           }))
         : itemsToCreate.map((item) => ({ ...item, image: null }));
-      const existingImageUpdates = includeImages.value
+      const existingImageUpdates = imageImportPlan.enabled
         ? (
             await mapWithConcurrency(
-              existingItemsToFillImage,
+              existingItemsToFillImage.slice(0, updateImageBudget),
               3,
               async ({ key, item, existingItem }) => ({
                 key,
@@ -1536,7 +1653,7 @@ router.post(
             data: {
               home_id: hogar_id,
               name: item.name,
-              image: item.image,
+              image: item.image || null,
               description: "",
               price: "",
               categories: [],
@@ -1614,6 +1731,18 @@ router.post(
           result.createdItemListsCount + result.updatedItemListsCount,
         updated_item_lists_count: result.updatedItemListsCount,
         image_count: result.imagesCount,
+        image_skipped_count:
+          includeImages.value && !imageImportPlan.enabled
+            ? itemsToCreate.length + existingItemsToFillImage.length
+            : Math.max(
+                itemsToCreate.length +
+                  existingItemsToFillImage.length -
+                  createImageBudget -
+                  updateImageBudget,
+                0
+              ),
+        limits: imageImportPlan.usage,
+        warning: imageImportPlan.warning,
       });
     } catch (error) {
       console.error(error);
@@ -1663,6 +1792,17 @@ router.post(
         return res
           .status(403)
           .json({ message: "No tienes permisos para editar este producto" });
+      }
+
+      if ((req.file?.path || imageUrl) && !item.image) {
+        const imageAllowance = await canAddProductImages(item.home_id, 1);
+        if (!imageAllowance.allowed) {
+          return res.status(403).json({
+            success: false,
+            message: getImageLimitMessage(imageAllowance),
+            limits: imageAllowance,
+          });
+        }
       }
 
       const image = [];

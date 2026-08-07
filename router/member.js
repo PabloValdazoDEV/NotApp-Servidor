@@ -49,10 +49,23 @@ router.post("/register-special", async (req, res) => {
     });
   }
 
-  const decoded = jwt.verify(token, process.env.JWT_SECRET);
+  let decoded = {};
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET);
+  } catch (error) {
+    return res.status(400).json({ message: "Token invalido" });
+  }
+  const invitedEmail = normalizeEmail(decoded.email);
 
-  if (normalizeEmail(decoded.email) !== normalizeEmail(email)) {
-    return res.status(400).json({ message: "El email invitado no conincide" });
+  if (!invitedEmail) {
+    return res.status(400).json({ message: "El token no tiene email invitado" });
+  }
+
+  if (
+    invitedEmail !== normalizeEmail(email) ||
+    invitedEmail !== normalizeEmail(emailConfirm)
+  ) {
+    return res.status(400).json({ message: "El email invitado no coincide" });
   }
 
   if (normalizeEmail(email) !== normalizeEmail(emailConfirm)) {
@@ -69,7 +82,7 @@ router.post("/register-special", async (req, res) => {
   const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{7,}$/;
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const passwordClean = password.trim();
-  const emailClean = normalizeEmail(email);
+  const emailClean = invitedEmail;
 
   try {
     if (

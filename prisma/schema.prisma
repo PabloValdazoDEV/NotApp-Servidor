@@ -13,6 +13,12 @@ enum ROLE {
   MEMBER
 }
 
+enum USER_PLAN {
+  FREE
+  PREMIUM
+  APP_OWNER
+}
+
 enum CATEGORY {
   FRUTAS_VERDURAS
   LACTEOS
@@ -76,10 +82,14 @@ model User {
   tutorial_home_id            String?
   install_prompt_completed_at DateTime?
   install_prompt_skipped_at   DateTime?
+  plan                        USER_PLAN      @default(FREE)
+  premium_home_slots          Int            @default(0)
+  premium_expires_at          DateTime?
   error_logins                ErrorLogin[]
   members                     Member[]
   invitations                 Invitation[]
   favoriteHomes               HomeFavorite[]
+  premiumAssignedHomes        Home[]         @relation("HomePremiumAssignedBy")
   oneTimeTokens               OneTimeToken[]
   createdAt                   DateTime       @default(now())
   updatedAt                   DateTime       @updatedAt
@@ -112,19 +122,27 @@ model ErrorLogin {
 }
 
 model Home {
-  id          String         @id @default(uuid())
-  name        String
-  image       String?
-  is_tutorial Boolean        @default(false)
-  members     Member[]
-  invitations Invitation[]
-  favoriteBy  HomeFavorite[]
-  menuTokens  MenuPublicToken[]
-  weeklyMenus WeeklyMenu[]
-  lists       List[]
-  items       Item[]
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  id                          String            @id @default(uuid())
+  name                        String
+  image                       String?
+  is_tutorial                 Boolean           @default(false)
+  premium_assigned_by_user_id String?
+  premium_assigned_at         DateTime?
+  premium_locked_until        DateTime?
+  premium_ends_at             DateTime?
+  premiumAssignedBy           User?             @relation("HomePremiumAssignedBy", fields: [premium_assigned_by_user_id], references: [id], onDelete: SetNull)
+  members                     Member[]
+  invitations                 Invitation[]
+  favoriteBy                  HomeFavorite[]
+  menuTokens                  MenuPublicToken[]
+  weeklyMenus                 WeeklyMenu[]
+  lists                       List[]
+  items                       Item[]
+  createdAt                   DateTime          @default(now())
+  updatedAt                   DateTime          @updatedAt
+
+  @@index([premium_assigned_by_user_id])
+  @@index([premium_ends_at])
 }
 
 model HomeFavorite {

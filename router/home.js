@@ -8,6 +8,7 @@ const cloudinary = require("cloudinary").v2;
 const { uploadImage } = require("../config/cloudinaryUpload");
 const { parseExplicitBoolean } = require("../utils/boolean");
 const { HOME_ADMIN_ROLES, getAccessibleHome } = require("../utils/permissions");
+const { getEffectiveUserPlan, getHomeLimits, USER_PLAN } = require("../utils/plans");
 const {
   findAndUploadFirstProductImage,
   mapWithConcurrency,
@@ -143,6 +144,20 @@ const attachNotFoundCopyFields = async (lists) => {
   return lists.map((list) => addNotFoundCopyFields(list, copyMap));
 };
 
+const addHomePlanFields = async (home) => {
+  if (!home?.id) return home;
+
+  const limits = await getHomeLimits(home.id);
+  return {
+    ...home,
+    effective_plan: limits.plan,
+    limits,
+  };
+};
+
+const attachHomePlanFields = async (homes) =>
+  Promise.all(homes.map((home) => addHomePlanFields(home)));
+
 router.post(
   "/create-home",
   authMiddleware,
@@ -173,13 +188,30 @@ router.post(
       }
 
       const initialItems = parseInitialItems(initial_items);
+      const currentUser = await prisma.user.findUnique({
+        where: { id: authenticatedUserId },
+        select: {
+          plan: true,
+          premium_expires_at: true,
+          premium_home_slots: true,
+        },
+      });
+      const userPlan = getEffectiveUserPlan(currentUser);
+      const canUseInitialItemImages =
+        includeInitialItemImages.value &&
+        [USER_PLAN.PREMIUM, USER_PLAN.APP_OWNER].includes(userPlan);
+      const initialItemImageBudget =
+        userPlan === USER_PLAN.APP_OWNER ? 200 : canUseInitialItemImages ? 60 : 0;
       const initialItemsWithImages =
-        includeInitialItemImages.value && initialItems.length > 0
-          ? await mapWithConcurrency(initialItems, 3, async (item) => ({
+        canUseInitialItemImages && initialItems.length > 0
+          ? await mapWithConcurrency(initialItems, 3, async (item, index) => ({
               ...item,
-              image: await findAndUploadFirstProductImage(item),
+              image:
+                index < initialItemImageBudget
+                  ? await findAndUploadFirstProductImage(item)
+                  : null,
             }))
-          : initialItems;
+          : initialItems.map((item) => ({ ...item, image: null }));
       const image = [];
 
       if (req.file?.path) {
@@ -259,7 +291,8 @@ router.get("/user-home/:user_id", authMiddleware, async (req, res) => {
       orderBy: { name: "asc" },
     });
 
-    const data = homes
+    const homesWithPlan = await attachHomePlanFields(homes);
+    const data = homesWithPlan
       .map((home) => ({
         ...home,
         is_favorite: favoriteHomeIds.has(home.id),
@@ -316,8 +349,10 @@ router.get("/:id", authMiddleware, async (req, res) => {
     hogar.members.sort((a, b) => {
       return roleOrder[a.role] - roleOrder[b.role];
     });
+    const hogarWithPlan = await addHomePlanFields(hogar);
+
     res.send({
-      ...hogar,
+      ...hogarWithPlan,
       lists: await attachNotFoundCopyFields(hogar.lists),
     });
   } catch (error) {
