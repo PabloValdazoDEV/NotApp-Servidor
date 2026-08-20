@@ -11,18 +11,21 @@ const DEFAULT_PREMIUM_HOME_SLOTS = 2;
 const HOME_LIMITS = {
   FREE: {
     plan: USER_PLAN.FREE,
+    maxMembers: 4,
     maxProductImages: 50,
     autoImageImportEnabled: false,
     maxAutoImageLookupsPerRequest: 0,
   },
   PREMIUM: {
     plan: USER_PLAN.PREMIUM,
+    maxMembers: 8,
     maxProductImages: 500,
     autoImageImportEnabled: true,
     maxAutoImageLookupsPerRequest: 60,
   },
   APP_OWNER: {
     plan: USER_PLAN.APP_OWNER,
+    maxMembers: 8,
     maxProductImages: 5000,
     autoImageImportEnabled: true,
     maxAutoImageLookupsPerRequest: 200,

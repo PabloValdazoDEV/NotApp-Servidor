@@ -7,13 +7,45 @@ const { DateTime } = require("luxon");
 const authMiddleware = require("../middleware/auth.middleware");
 const transporter = require("../config/nodemailer");
 const { renderEmail, getEmailAttachments } = require("../config/emailTemplate");
+const { getHomeLimits } = require("../utils/plans");
 require("dotenv").config();
 
-const register = process.env.URL_REGISTER;
+const configuredRegisterPath = process.env.URL_REGISTER?.trim();
+const registerPaths = [
+  "/register",
+  configuredRegisterPath,
+].filter((path, index, paths) => path && paths.indexOf(path) === index);
 const mailFrom = process.env.MAIL_FROM || '"NotApp" <no-reply@notapp.com>';
 
-router.post(register, async (req, res) => {
-  const { name, email, emailConfirm, password, passwordConfirm } = req.body;
+const getPublicInviteHomeId = async (inviteToken) => {
+  if (!inviteToken) return null;
+
+  try {
+    const decoded = jwt.verify(inviteToken, process.env.JWT_SECRET);
+    if (decoded?.purpose !== "public-home-invite" || !decoded.home_id) {
+      return null;
+    }
+
+    const home = await prisma.home.findUnique({
+      where: { id: decoded.home_id },
+      select: { id: true },
+    });
+
+    return home?.id || null;
+  } catch {
+    return null;
+  }
+};
+
+router.post(registerPaths, async (req, res) => {
+  const {
+    name,
+    email,
+    emailConfirm,
+    password,
+    passwordConfirm,
+    inviteToken,
+  } = req.body;
 
   if (!email || !emailConfirm || !password || !name || !passwordConfirm) {
     return res.status(400).json({
@@ -60,28 +92,70 @@ router.post(register, async (req, res) => {
       return res.status(400).json({ message: "Las contraseñas no coinciden" });
     }
 
-    const existingUser = await prisma.user.findUnique({ where: { email } });
+    const publicInviteHomeId = await getPublicInviteHomeId(inviteToken);
+    if (inviteToken && !publicInviteHomeId) {
+      return res.status(400).json({
+        message: "El enlace de invitación no es válido o ha caducado",
+      });
+    }
+
+    const existingUser = await prisma.user.findUnique({
+      where: { email: emailClean },
+    });
     if (existingUser) {
       return res.status(400).json({ message: "El email ya está registrado" });
     }
 
     const hashedPassword = await bcrypt.hash(passwordClean, 10);
 
-    const user = await prisma.user.create({
-      data: {
-        email,
-        name,
-        password: hashedPassword,
-      },
+    const user = await prisma.$transaction(async (tx) => {
+      const createdUser = await tx.user.create({
+        data: {
+          email: emailClean,
+          name: name.trim(),
+          password: hashedPassword,
+        },
+      });
+
+      if (publicInviteHomeId) {
+        const memberCount = await tx.member.count({
+          where: { home_id: publicInviteHomeId },
+        });
+
+        const limits = await getHomeLimits(publicInviteHomeId, { tx });
+
+        if (memberCount >= limits.maxMembers) {
+          throw new Error("HOME_MEMBER_LIMIT");
+        }
+
+        await tx.member.create({
+          data: {
+            user_id: createdUser.id,
+            home_id: publicInviteHomeId,
+            role: "MEMBER",
+          },
+        });
+      }
+
+      return createdUser;
     });
 
-    const token = jwt.sign({ id: user.id, email }, process.env.JWT_SECRET, {
+    const token = jwt.sign({ id: user.id, email: emailClean }, process.env.JWT_SECRET, {
       expiresIn: "30d",
     });
 
-    res.json({ message: "Usuario registrado correctamente", token });
+    res.json({
+      message: "Usuario registrado correctamente",
+      token,
+      joinedHomeId: publicInviteHomeId,
+    });
   } catch (error) {
     console.error(error);
+    if (error.message === "HOME_MEMBER_LIMIT") {
+      return res.status(400).json({
+        message: "Este hogar ya ha alcanzado el límite de miembros",
+      });
+    }
     res.status(500).json({ message: "Server error" });
   }
 });
