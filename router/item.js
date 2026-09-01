@@ -14,6 +14,10 @@ const {
   canAddProductImages,
   getHomeProductImageUsage,
 } = require("../utils/plans");
+const {
+  expensiveUserRateLimiter,
+  imageSearchRateLimiter,
+} = require("../middleware/rateLimit");
 
 const MAX_EXTERNAL_IMAGE_BYTES = 5 * 1024 * 1024;
 const EXTERNAL_IMAGE_TIMEOUT_MS = 7000;
@@ -1067,6 +1071,7 @@ const searchProductImages = async ({
 router.post(
   "/create-item",
   authMiddleware,
+  expensiveUserRateLimiter,
   upload.single("file"),
   async (req, res) => {
     const {
@@ -1153,7 +1158,11 @@ router.post(
   }
 );
 
-router.get("/image-search", authMiddleware, async (req, res) => {
+router.get(
+  "/image-search",
+  authMiddleware,
+  imageSearchRateLimiter,
+  async (req, res) => {
   const {
     name,
     description,
@@ -1194,9 +1203,14 @@ router.get("/image-search", authMiddleware, async (req, res) => {
       message: "No se han podido buscar imágenes",
     });
   }
-});
+  }
+);
 
-router.post("/import-from-home", authMiddleware, async (req, res) => {
+router.post(
+  "/import-from-home",
+  authMiddleware,
+  expensiveUserRateLimiter,
+  async (req, res) => {
   const { source_home_id, target_home_id, item_ids } = req.body;
   const userId = req.user?.id;
 
@@ -1338,9 +1352,14 @@ router.post("/import-from-home", authMiddleware, async (req, res) => {
     console.error(error);
     res.status(500).json({ message: "Server error" });
   }
-});
+  }
+);
 
-router.post("/import-starter-products", authMiddleware, async (req, res) => {
+router.post(
+  "/import-starter-products",
+  authMiddleware,
+  expensiveUserRateLimiter,
+  async (req, res) => {
   const { target_home_id, items, include_images } = req.body;
   const userId = req.user?.id;
 
@@ -1508,11 +1527,13 @@ router.post("/import-starter-products", authMiddleware, async (req, res) => {
     console.error(error);
     res.status(500).json({ message: "Server error" });
   }
-});
+  }
+);
 
 router.post(
   "/create-missing-list-products",
   authMiddleware,
+  expensiveUserRateLimiter,
   async (req, res) => {
     const { hogar_id, list_id, items, include_images } = req.body;
     const userId = req.user?.id;
@@ -1754,6 +1775,7 @@ router.post(
 router.post(
   "/:item_id",
   authMiddleware,
+  expensiveUserRateLimiter,
   upload.single("file"),
   async (req, res) => {
     const {

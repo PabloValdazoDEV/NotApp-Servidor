@@ -1,12 +1,22 @@
 const express = require("express");
 const router = express.Router();
 const prisma = require("../prisma/prisma");
-const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { DateTime } = require("luxon");
 const authMiddleware = require("../middleware/auth.middleware");
+const {
+  registrationAccountRateLimiter,
+  registrationIpRateLimiter,
+} = require("../middleware/rateLimit");
 const transporter = require("../config/nodemailer");
 const { renderEmail, getEmailAttachments } = require("../config/emailTemplate");
+const { getInvitationContext } = require("../utils/invitationToken");
+const {
+  createPendingRegistration,
+  findUserByEmail,
+  sendRegistrationCodeEmail,
+  validateRegistrationData,
+} = require("../utils/registration");
 require("dotenv").config();
 
 const MAX_HOME_MEMBERS = 8;
@@ -32,150 +42,58 @@ const isHomeAdmin = async (userId, homeId) => {
   return Boolean(member);
 };
 
-router.post("/register-special", async (req, res) => {
-  const { name, email, emailConfirm, password, passwordConfirm, token } =
-    req.body;
-
-  if (
-    !email ||
-    !emailConfirm ||
-    !password ||
-    !name ||
-    !passwordConfirm ||
-    !token
-  ) {
-    return res.status(400).json({
-      message: "Faltan datos",
-    });
+router.post(
+  "/register-special",
+  registrationIpRateLimiter,
+  registrationAccountRateLimiter,
+  async (req, res) => {
+  const { name, email, password, token } = req.body || {};
+  const validationError = validateRegistrationData({ name, email, password });
+  if (validationError || !token) {
+    return res.status(400).json({ message: validationError || "Faltan datos" });
   }
 
-  let decoded = {};
+  const emailClean = normalizeEmail(email);
   try {
-    decoded = jwt.verify(token, process.env.JWT_SECRET);
-  } catch (error) {
-    return res.status(400).json({ message: "Token invalido" });
-  }
-  const invitedEmail = normalizeEmail(decoded.email);
-
-  if (!invitedEmail) {
-    return res.status(400).json({ message: "El token no tiene email invitado" });
-  }
-
-  if (
-    invitedEmail !== normalizeEmail(email) ||
-    invitedEmail !== normalizeEmail(emailConfirm)
-  ) {
-    return res.status(400).json({ message: "El email invitado no coincide" });
-  }
-
-  if (normalizeEmail(email) !== normalizeEmail(emailConfirm)) {
-    return res.status(400).json({
-      message: "Los Emails no son iguales",
-    });
-  }
-  if (password !== passwordConfirm) {
-    return res.status(400).json({
-      message: "Las Contraseñas no son iguales",
-    });
-  }
-
-  const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{7,}$/;
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  const passwordClean = password.trim();
-  const emailClean = invitedEmail;
-
-  try {
-    if (
-      !passwordRegex.test(passwordClean) ||
-      !emailRegex.test(emailClean) ||
-      !password ||
-      !email
-    ) {
-      return res.status(400).json({
-        message: "El formato de la contraseña o del email no es valida",
-      });
+    const invitationContext = await getInvitationContext(token);
+    if (invitationContext.invitedEmail !== emailClean) {
+      return res.status(400).json({ message: "El email invitado no coincide" });
     }
 
-    if (!passwordRegex.test(passwordClean)) {
-      return res.status(400).json({
-        message:
-          "La contraseña debe tener al menos 7 caracteres, una mayúscula, un número y un carácter especial",
-      });
-    }
-
-    if (password !== passwordConfirm) {
-      return res.status(400).json({ message: "Las contraseñas no coinciden" });
-    }
-
-    const existingUser = await prisma.user.findUnique({
-      where: { email: emailClean },
-    });
-    if (existingUser) {
+    const existingUser = await findUserByEmail(emailClean);
+    if (existingUser && existingUser.password_enabled !== false) {
       return res.status(400).json({ message: "El email ya está registrado" });
     }
 
-    const tokenValidate = await prisma.oneTimeToken.findUnique({
-      where: { token },
+    const registration = await createPendingRegistration({
+      name,
+      email: emailClean,
+      password,
+      inviteToken: token,
     });
 
-    if (
-      !tokenValidate ||
-      tokenValidate.used ||
-      tokenValidate.expiresAt < Date.now()
-    ) {
-      return res.status(400).json({ message: "Token invalido" });
-    }
-
-    const pendingInvitation = await prisma.invitation.findFirst({
-      where: {
-        home_id: decoded.id_hogar,
-        email: emailClean,
-      },
+    await sendRegistrationCodeEmail({
+      email: emailClean,
+      name,
+      code: registration.code,
+      expiresInMinutes: registration.expiresInMinutes,
+      inviteToken: token,
     });
 
-    if (!pendingInvitation) {
-      return res
-        .status(400)
-        .json({ message: "Invitación no encontrada o cancelada" });
-    }
-
-    const hashedPassword = await bcrypt.hash(passwordClean, 10);
-
-    const user = await prisma.user.create({
-      data: {
-        email: emailClean,
-        name,
-        password: hashedPassword,
-      },
+    return res.json({
+      message: "Código de verificación enviado",
+      email: emailClean,
+      expires_in_minutes: registration.expiresInMinutes,
     });
-
-    const tokenAuth = jwt.sign(
-      { id: user.id, email: emailClean },
-      process.env.JWT_SECRET,
-      {
-        expiresIn: "30d",
-      }
-    );
-
-    await prisma.oneTimeToken.update({
-      where: { id: tokenValidate.id },
-      data: { used: true },
-    });
-
-    await prisma.invitation.update({
-      where: { id: pendingInvitation.id },
-      data: {
-        user_id: user.id,
-        email: emailClean,
-      },
-    });
-
-    res.json({ message: "Usuario registrado correctamente", token: tokenAuth });
   } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
     console.error(error);
-    res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ message: "No se pudo iniciar el registro" });
   }
-});
+  }
+);
 
 router.post("/invite-check", authMiddleware, async (req, res) => {
   const { id_invitation, accept } = req.body;

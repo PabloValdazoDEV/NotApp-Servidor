@@ -74,6 +74,8 @@ enum MENU_MEAL_TYPE {
 model User {
   id                          String         @id @default(uuid())
   email                       String         @unique
+  google_sub                  String?        @unique
+  password_enabled            Boolean        @default(true)
   name                        String?
   password                    String
   image                       String?
@@ -254,4 +256,19 @@ model OneTimeToken {
   used      Boolean  @default(false)
   expiresAt DateTime
   createdAt DateTime @default(now())
+}
+
+model PendingRegistration {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  name          String
+  password      String
+  code_hash     String
+  invite_token  String?
+  attempts      Int      @default(0)
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([expiresAt])
 }

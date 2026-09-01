@@ -16,6 +16,7 @@ const {
   getPremiumHomeSlots,
   USER_PLAN,
 } = require("../utils/plans");
+const { accountDeletionRateLimiter } = require("../middleware/rateLimit");
 require("dotenv").config();
 
 const PREMIUM_HOME_LOCK_DAYS = 30;
@@ -236,6 +237,7 @@ router.get("/:id_user", authMiddleware, async (req, res) => {
         name: true,
         email: true,
         image: true,
+        password_enabled: true,
         plan: true,
         premium_home_slots: true,
         premium_expires_at: true,
@@ -256,7 +258,12 @@ router.get("/:id_user", authMiddleware, async (req, res) => {
 
     res.json({
       message: "Datos enviados",
-      user: user,
+      user: {
+        ...user,
+        requires_password:
+          user.password_enabled !== false &&
+          req.user?.auth_provider !== "google",
+      },
       premium_homes: premiumHomes,
     });
   } catch (error) {
@@ -526,13 +533,17 @@ router.delete("/:id_user/premium-homes/:home_id", authMiddleware, async (req, re
   }
 });
 
-router.delete("/:id_user/account", authMiddleware, async (req, res) => {
+router.delete(
+  "/:id_user/account",
+  authMiddleware,
+  accountDeletionRateLimiter,
+  async (req, res) => {
   const { id_user } = req.params;
   const authenticatedUserId = req.user?.id;
   const { password, confirmation } = req.body || {};
 
   try {
-    if (!id_user || !authenticatedUserId || !password || !confirmation) {
+    if (!id_user || !authenticatedUserId || !confirmation) {
       return res.status(400).json({ message: "Faltan datos" });
     }
 
@@ -555,6 +566,7 @@ router.delete("/:id_user/account", authMiddleware, async (req, res) => {
         email: true,
         name: true,
         password: true,
+        password_enabled: true,
         image: true,
         members: {
           select: {
@@ -594,9 +606,18 @@ router.delete("/:id_user/account", authMiddleware, async (req, res) => {
       return res.status(404).json({ message: "Usuario no encontrado" });
     }
 
-    const passwordMatch = await bcrypt.compare(password, user.password);
-    if (!passwordMatch) {
-      return res.status(401).json({ message: "La contraseña no es correcta" });
+    const requiresPassword =
+      user.password_enabled !== false && req.user?.auth_provider !== "google";
+
+    if (requiresPassword) {
+      if (!password) {
+        return res.status(400).json({ message: "Introduce tu contraseña" });
+      }
+
+      const passwordMatch = await bcrypt.compare(password, user.password);
+      if (!passwordMatch) {
+        return res.status(401).json({ message: "La contraseña no es correcta" });
+      }
     }
 
     const emailToNotify = user.email;
@@ -769,7 +790,8 @@ router.delete("/:id_user/account", authMiddleware, async (req, res) => {
     console.error(error);
     return res.status(500).json({ message: "Server error" });
   }
-});
+  }
+);
 
 router.post(
   "/:id_user",

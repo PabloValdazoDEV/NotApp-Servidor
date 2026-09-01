@@ -12,6 +12,12 @@ const cloudinary = require('cloudinary').v2;
 const prisma = require("./prisma/prisma");
 const jwt = require("jsonwebtoken");
 const { getAccessibleList } = require("./utils/permissions");
+const { getAllowedGoogleClientIds } = require("./utils/googleAuth");
+const {
+  globalApiRateLimiter,
+  socketConnectionRateLimiter,
+  socketEventRateLimiter,
+} = require("./middleware/rateLimit");
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: corsConfig,
@@ -19,9 +25,16 @@ const io = new Server(server, {
 
 app.set("io", io);
 
+if (process.env.TRUST_PROXY === "true") {
+  app.set("trust proxy", 1);
+} else if (/^\d+$/.test(process.env.TRUST_PROXY || "")) {
+  app.set("trust proxy", Number(process.env.TRUST_PROXY));
+}
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors(corsConfig));
+app.use(globalApiRateLimiter);
 
 
 cloudinary.config({ 
@@ -36,6 +49,15 @@ app.use(methodOverride("_method"));
 app.use("/", router);
 
 io.use((socket, next) => {
+  const connectionAllowance = socketConnectionRateLimiter(socket);
+  if (!connectionAllowance.allowed) {
+    return next(
+      new Error(
+        `Demasiadas conexiones. Reintenta en ${connectionAllowance.retryAfterSeconds} segundos.`
+      )
+    );
+  }
+
   const authToken = socket.handshake.auth?.token;
   const headerToken = socket.handshake.headers?.authorization?.split(" ")[1];
   const token = authToken || headerToken;
@@ -53,7 +75,20 @@ io.use((socket, next) => {
 });
 
 io.on("connection", (socket) => {
+  const allowEvent = (eventName) => {
+    const allowance = socketEventRateLimiter(socket, eventName);
+    if (allowance.allowed) return true;
+
+    socket.emit("rate-limit", {
+      event: eventName,
+      message: "Demasiadas acciones en tiempo real. Espera unos minutos.",
+      retry_after_seconds: allowance.retryAfterSeconds,
+    });
+    return false;
+  };
+
   socket.on("list:join", async ({ list_id } = {}) => {
+    if (!allowEvent("list:join")) return;
     if (!list_id) return;
 
     try {
@@ -140,6 +175,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("list:leave", ({ list_id } = {}) => {
+    if (!allowEvent("list:leave")) return;
     if (!list_id) return;
     socket.leave(`list:${list_id}`);
   });
@@ -148,5 +184,8 @@ io.on("connection", (socket) => {
 server.listen(PORT, '0.0.0.0',() => {
   console.log(
     `El servidor esta activo y esta escuchando por el puerto ${PORT}`
+  );
+  console.log(
+    `Google Sign-In: ${getAllowedGoogleClientIds().length > 0 ? "configurado" : "no configurado"}`
   );
 });

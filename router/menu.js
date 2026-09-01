@@ -4,6 +4,10 @@ const { DateTime } = require("luxon");
 const prisma = require("../prisma/prisma");
 const authMiddleware = require("../middleware/auth.middleware");
 const { getAccessibleHome } = require("../utils/permissions");
+const {
+  expensiveUserRateLimiter,
+  publicMenuRateLimiter,
+} = require("../middleware/rateLimit");
 
 const router = express.Router();
 
@@ -391,7 +395,7 @@ const buildPublicTokenPayload = (publicToken) => ({
   public_path: `/menu-publico/${publicToken.token}`,
 });
 
-router.get("/public/:token", async (req, res) => {
+router.get("/public/:token", publicMenuRateLimiter, async (req, res) => {
   const { token } = req.params;
 
   try {
@@ -459,7 +463,7 @@ router.get("/home/:home_id", async (req, res) => {
   }
 });
 
-router.post("/import/preview", async (req, res) => {
+router.post("/import/preview", expensiveUserRateLimiter, async (req, res) => {
   const { home_id, text } = req.body;
 
   try {
@@ -484,7 +488,7 @@ router.post("/import/preview", async (req, res) => {
   }
 });
 
-router.post("/import", async (req, res) => {
+router.post("/import", expensiveUserRateLimiter, async (req, res) => {
   const { home_id, text } = req.body;
   const userId = req.user?.id;
 

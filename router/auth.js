@@ -3,98 +3,316 @@ const router = express.Router();
 const prisma = require("../prisma/prisma");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const { randomBytes } = require("node:crypto");
 const { DateTime } = require("luxon");
 const authMiddleware = require("../middleware/auth.middleware");
 const transporter = require("../config/nodemailer");
 const { renderEmail, getEmailAttachments } = require("../config/emailTemplate");
+const {
+  normalizeEmail,
+  verifyGoogleIdToken,
+} = require("../utils/googleAuth");
+const { getInvitationContext } = require("../utils/invitationToken");
+const {
+  completePendingRegistration,
+  createPendingRegistration,
+  findUserByEmail,
+  resendPendingRegistration,
+  sendRegistrationCodeEmail,
+  validateRegistrationData,
+} = require("../utils/registration");
+const {
+  googleLoginRateLimiter,
+  loginAccountRateLimiter,
+  loginIpRateLimiter,
+  passwordRecoveryAccountRateLimiter,
+  passwordRecoveryIpRateLimiter,
+  registrationAccountRateLimiter,
+  registrationIpRateLimiter,
+  resendAccountRateLimiter,
+  resendIpRateLimiter,
+  tokenCheckRateLimiter,
+  verificationAccountRateLimiter,
+  verificationIpRateLimiter,
+} = require("../middleware/rateLimit");
 require("dotenv").config();
 
 const register = process.env.URL_REGISTER;
 const mailFrom = process.env.MAIL_FROM || '"NotApp" <no-reply@notapp.com>';
 
-router.post(register, async (req, res) => {
-  const { name, email, emailConfirm, password, passwordConfirm } = req.body;
+const createSessionToken = (user, authProvider = "password") =>
+  jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      auth_provider: authProvider,
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: "30d" }
+  );
 
-  if (!email || !emailConfirm || !password || !name || !passwordConfirm) {
-    return res.status(400).json({
-      message: "Faltan datos",
-    });
+const createHttpError = (message, status = 400) => {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+};
+
+router.post(
+  register,
+  registrationIpRateLimiter,
+  registrationAccountRateLimiter,
+  async (req, res) => {
+  const { name, email, password } = req.body || {};
+  const validationError = validateRegistrationData({ name, email, password });
+  if (validationError) {
+    return res.status(400).json({ message: validationError });
   }
 
-  if (email !== emailConfirm) {
-    return res.status(400).json({
-      message: "Los Emails no son iguales",
-    });
-  }
-  if (password !== passwordConfirm) {
-    return res.status(400).json({
-      message: "Las Contraseñas no son iguales",
-    });
-  }
-
-  const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{7,}$/;
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  const passwordClean = password.trim();
-  const emailClean = email.trim();
-
+  const emailClean = normalizeEmail(email);
   try {
-    if (
-      !passwordRegex.test(passwordClean) ||
-      !emailRegex.test(emailClean) ||
-      !password ||
-      !email
-    ) {
-      return res.status(400).json({
-        message: "El formato de la contraseña o del email no es valida",
-      });
-    }
-
-    if (!passwordRegex.test(passwordClean)) {
-      return res.status(400).json({
-        message:
-          "La contraseña debe tener al menos 7 caracteres, una mayúscula, un número y un carácter especial",
-      });
-    }
-
-    if (password !== passwordConfirm) {
-      return res.status(400).json({ message: "Las contraseñas no coinciden" });
-    }
-
-    const existingUser = await prisma.user.findUnique({ where: { email } });
-    if (existingUser) {
+    const existingUser = await findUserByEmail(emailClean);
+    if (existingUser && existingUser.password_enabled !== false) {
       return res.status(400).json({ message: "El email ya está registrado" });
     }
 
-    const hashedPassword = await bcrypt.hash(passwordClean, 10);
-
-    const user = await prisma.user.create({
-      data: {
-        email,
-        name,
-        password: hashedPassword,
-      },
+    const registration = await createPendingRegistration({
+      name,
+      email: emailClean,
+      password,
     });
 
-    const token = jwt.sign({ id: user.id, email }, process.env.JWT_SECRET, {
-      expiresIn: "30d",
+    await sendRegistrationCodeEmail({
+      email: emailClean,
+      name,
+      code: registration.code,
+      expiresInMinutes: registration.expiresInMinutes,
     });
 
-    res.json({ message: "Usuario registrado correctamente", token });
+    return res.json({
+      message: "Código de verificación enviado",
+      email: emailClean,
+      expires_in_minutes: registration.expiresInMinutes,
+    });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ message: "No se pudo iniciar el registro" });
+  }
+  }
+);
+
+router.post("/auth/google", googleLoginRateLimiter, async (req, res) => {
+  const idToken = req.body?.idToken || req.body?.credential;
+  const inviteToken = req.body?.inviteToken || null;
+
+  try {
+    const googleProfile = await verifyGoogleIdToken(idToken);
+    const invitationContext = await getInvitationContext(inviteToken);
+
+    const user = await prisma.$transaction(async (tx) => {
+      const userByGoogle = await tx.user.findUnique({
+        where: { google_sub: googleProfile.sub },
+      });
+      const userByEmail = await findUserByEmail(googleProfile.email, tx);
+
+      if (userByGoogle && userByEmail && userByGoogle.id !== userByEmail.id) {
+        throw createHttpError(
+          "La cuenta de Google ya está vinculada a otra cuenta de NotApp",
+          409
+        );
+      }
+
+      let currentUser = userByGoogle || userByEmail;
+
+      if (!currentUser) {
+        const generatedPassword = randomBytes(32).toString("base64url");
+        const password = await bcrypt.hash(generatedPassword, 10);
+
+        currentUser = await tx.user.create({
+          data: {
+            email: googleProfile.email,
+            google_sub: googleProfile.sub,
+            password_enabled: false,
+            name: googleProfile.name || googleProfile.email.split("@")[0],
+            image: googleProfile.picture,
+            password,
+          },
+        });
+      } else if (!currentUser.google_sub) {
+        currentUser = await tx.user.update({
+          where: { id: currentUser.id },
+          data: {
+            google_sub: googleProfile.sub,
+            image: currentUser.image || googleProfile.picture,
+          },
+        });
+      }
+
+      if (invitationContext) {
+        await tx.invitation.update({
+          where: { id: invitationContext.invitation.id },
+          data: { user_id: currentUser.id },
+        });
+        await tx.oneTimeToken.update({
+          where: { id: invitationContext.tokenRecord.id },
+          data: { used: true },
+        });
+      }
+
+      return currentUser;
+    });
+
+    return res.json({
+      message: "Google conectado correctamente",
+      token: createSessionToken(user, "google"),
+      invitationLinked: Boolean(invitationContext),
+    });
+  } catch (error) {
+    if (error.code === "GOOGLE_NOT_CONFIGURED") {
+      return res.status(503).json({
+        message: "Google Sign-In no está configurado en el servidor",
+      });
+    }
+
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+
+    console.error("Error validando el login de Google:", error);
+    return res.status(401).json({
+      message: "No se pudo validar la cuenta de Google",
+    });
   }
 });
 
-router.post("/login", async (req, res) => {
-  const { email, password } = req.body;
+router.post(
+  "/auth/register/verify",
+  verificationIpRateLimiter,
+  verificationAccountRateLimiter,
+  async (req, res) => {
+  const { email, code, inviteToken } = req.body || {};
+
+  if (!email || !code) {
+    return res.status(400).json({ message: "Introduce el email y el código" });
+  }
+
   try {
-    const user = await prisma.user.findUnique({ where: { email } });
+    const user = await completePendingRegistration({
+      email,
+      code,
+      inviteToken,
+    });
+
+    return res.json({
+      message: "Usuario registrado correctamente",
+      token: createSessionToken(user, "password"),
+    });
+  } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+
+    console.error("Error verificando el registro:", error);
+    return res.status(500).json({ message: "No se pudo verificar el registro" });
+  }
+  }
+);
+
+router.post(
+  "/auth/register/resend",
+  resendIpRateLimiter,
+  resendAccountRateLimiter,
+  async (req, res) => {
+  const { email } = req.body || {};
+
+  if (!email) {
+    return res.status(400).json({ message: "Falta el email" });
+  }
+
+  try {
+    const registration = await resendPendingRegistration(email);
+    await sendRegistrationCodeEmail({
+      email: registration.pending.email,
+      name: registration.pending.name,
+      code: registration.code,
+      expiresInMinutes: registration.expiresInMinutes,
+      inviteToken: registration.pending.invite_token,
+    });
+
+    return res.json({
+      message: "Código de verificación reenviado",
+      expires_in_minutes: registration.expiresInMinutes,
+    });
+  } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+
+    console.error("Error reenviando el código de registro:", error);
+    return res.status(500).json({ message: "No se pudo reenviar el código" });
+  }
+  }
+);
+
+router.post("/auth/claim-invitation", authMiddleware, async (req, res) => {
+  try {
+    if (!req.user?.id) {
+      return res.status(401).json({ message: "No se proporcionó usuario" });
+    }
+
+    const invitationContext = await getInvitationContext(req.body?.inviteToken);
+    if (!invitationContext) {
+      throw createHttpError("Falta el enlace de invitación");
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.invitation.update({
+        where: { id: invitationContext.invitation.id },
+        data: { user_id: req.user.id },
+      });
+      await tx.oneTimeToken.update({
+        where: { id: invitationContext.tokenRecord.id },
+        data: { used: true },
+      });
+    });
+
+    return res.json({
+      success: true,
+      message: "Invitación vinculada correctamente",
+    });
+  } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+
+    console.error("Error vinculando la invitación:", error);
+    return res.status(500).json({ message: "No se pudo vincular la invitación" });
+  }
+});
+
+router.post(
+  "/login",
+  loginIpRateLimiter,
+  loginAccountRateLimiter,
+  async (req, res) => {
+  const { email, password } = req.body;
+  const emailClean = normalizeEmail(email);
+  try {
+    const user = await prisma.user.findFirst({
+      where: { email: { equals: emailClean, mode: "insensitive" } },
+    });
 
     if (user === null) {
       return res
         .status(401)
         .json({ message: "Ese correo no esta registrado." });
+    }
+
+    if (user.password_enabled === false) {
+      return res.status(401).json({
+        message:
+          "Esta cuenta usa Google. Inicia sesión con Google o completa el registro con código para añadir una contraseña.",
+      });
     }
     const ahora = DateTime.now().setZone("Europe/Madrid");
 
@@ -138,22 +356,13 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    const token = jwt.sign(
-      {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-      },
-      process.env.JWT_SECRET,
-      {
-        expiresIn: "30d",
-      }
-    );
+    const token = createSessionToken(user, "password");
     res.json({ message: "Credenciales correctas", token });
   } catch (error) {
     res.status(500).json({ message: "Server error" });
   }
-});
+  }
+);
 
 router.post("/logout", authMiddleware, (req, res) => {
   res.json({
@@ -172,6 +381,7 @@ router.get("/me", authMiddleware, async (req, res) => {
         name: true,
         id: true,
         image:true,
+        password_enabled: true,
         plan: true,
         premium_home_slots: true,
         premium_expires_at: true,
@@ -190,14 +400,21 @@ router.get("/me", authMiddleware, async (req, res) => {
   }
 });
 
-router.post("/forgot-password", async (req, res) => {
+router.post(
+  "/forgot-password",
+  passwordRecoveryIpRateLimiter,
+  passwordRecoveryAccountRateLimiter,
+  async (req, res) => {
   const { email } = req.body;
   const ahora = DateTime.now().setZone("Europe/Madrid");
   const en30Min = ahora.plus({ minutes: 30 });
   const formatoISO = en30Min.toISO();
 
   try {
-    const user = await prisma.user.findUnique({ where: { email } });
+    const emailClean = normalizeEmail(email);
+    const user = await prisma.user.findFirst({
+      where: { email: { equals: emailClean, mode: "insensitive" } },
+    });
     if (!user) {
       return res.status(404).json({ message: "Usuario no encontrado" });
     }
@@ -218,7 +435,7 @@ router.post("/forgot-password", async (req, res) => {
 
     const mailOptions = {
       from: mailFrom,
-      to: email,
+      to: user.email,
       subject: "Restablecer contraseña",
       html: renderEmail({
         preheader: "Restablece tu contraseña de NotApp.",
@@ -242,9 +459,10 @@ router.post("/forgot-password", async (req, res) => {
     console.error(error);
     res.status(500).json({ message: "Server error" });
   }
-});
+  }
+);
 
-router.post("/reset-password/:token", async (req, res) => {
+router.post("/reset-password/:token", tokenCheckRateLimiter, async (req, res) => {
   const { password, passwordConfirm } = req.body;
   const { token } = req.params;
 
@@ -276,7 +494,7 @@ router.post("/reset-password/:token", async (req, res) => {
       where: { token },
     });
 
-    if (tokenValidate.used || tokenValidate.expiresAt < Date.now()) {
+    if (!tokenValidate || tokenValidate.used || tokenValidate.expiresAt < Date.now()) {
       return res.status(400).json({ message: "Token invalido" });
     }
 
@@ -289,7 +507,7 @@ router.post("/reset-password/:token", async (req, res) => {
 
     await prisma.user.update({
       where: { id: tokenValidate.user_id },
-      data: { password: hashedPassword },
+      data: { password: hashedPassword, password_enabled: true },
     });
 
     res.json({ message: "Contraseña actualizada correctamente" });
@@ -299,7 +517,7 @@ router.post("/reset-password/:token", async (req, res) => {
   }
 });
 
-router.get("/check-token/:token", async (req, res) => {
+router.get("/check-token/:token", tokenCheckRateLimiter, async (req, res) => {
     const { token } = req.params;
 
     try {

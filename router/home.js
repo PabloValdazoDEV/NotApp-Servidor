@@ -9,6 +9,7 @@ const { uploadImage } = require("../config/cloudinaryUpload");
 const { parseExplicitBoolean } = require("../utils/boolean");
 const { HOME_ADMIN_ROLES, getAccessibleHome } = require("../utils/permissions");
 const { getEffectiveUserPlan, getHomeLimits, USER_PLAN } = require("../utils/plans");
+const { expensiveUserRateLimiter } = require("../middleware/rateLimit");
 const {
   findAndUploadFirstProductImage,
   mapWithConcurrency,
@@ -161,6 +162,7 @@ const attachHomePlanFields = async (homes) =>
 router.post(
   "/create-home",
   authMiddleware,
+  expensiveUserRateLimiter,
   upload.single("file"),
   async (req, res) => {
     const { user_id, name, initial_items, include_initial_item_images } =

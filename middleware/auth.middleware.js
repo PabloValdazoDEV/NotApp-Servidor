@@ -1,4 +1,5 @@
 const jwt = require("jsonwebtoken");
+const { authenticatedUserRateLimiter } = require("./rateLimit");
 
 const authMiddleware = (req, res, next) => {
   try {
@@ -6,7 +7,7 @@ const authMiddleware = (req, res, next) => {
     const apiKey = req.header("x-api-key");
 
     if (apiKey && apiKey === process.env.VITE_API_KEY) {
-      return next();
+      return authenticatedUserRateLimiter(req, res, next);
     }
 
     if (!token) {
@@ -16,7 +17,7 @@ const authMiddleware = (req, res, next) => {
     }
 
     req.user = jwt.verify(token, process.env.JWT_SECRET);
-    next();
+    return authenticatedUserRateLimiter(req, res, next);
   } catch (error) {
     return res.status(401).json({ message: "Token inválido o expirado" });
   }

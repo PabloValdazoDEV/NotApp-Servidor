@@ -143,7 +143,7 @@ La API se monta desde `/` y agrupa endpoints por dominio.
 
 | Área | Endpoints principales |
 | --- | --- |
-| Auth | `POST /login`, `GET /me`, `POST /forgot-password`, `POST /reset-password/:token` |
+| Auth | `POST /login`, `POST /auth/google`, `POST /auth/register/verify`, `POST /auth/register/resend`, `POST /auth/claim-invitation`, `GET /me`, `POST /forgot-password`, `POST /reset-password/:token` |
 | Hogares | `POST /home/create-home`, `GET /home/user-home/:user_id`, `GET /home/:id`, `DELETE /home/:hogar_id` |
 | Favoritos | `POST /home/:home_id/favorite`, `DELETE /home/:home_id/favorite` |
 | Miembros | `POST /member/invite/:id_hogar`, `GET /member/invite/pending/:homeId`, `DELETE /member/invite/:invitationId` |
@@ -177,6 +177,14 @@ VITE_API_URL=
 VITE_API_KEY=
 URL=
 URL_REGISTER=
+REGISTRATION_CODE_EXPIRES_MINUTES=15
+
+# Google Sign-In
+GOOGLE_WEB_CLIENT_ID=
+GOOGLE_SERVER_CLIENT_ID=
+GOOGLE_ANDROID_CLIENT_ID=
+GOOGLE_IOS_CLIENT_ID=
+GOOGLE_CLIENT_IDS=
 
 NAME_CLOUDINARY=
 API_KEY_CLOUDINARY=
@@ -201,6 +209,96 @@ PEXELS_API_KEY=
 UNSPLASH_ACCESS_KEY=
 ```
 
+## Google Sign-In E Invitaciones
+
+El frontend recibe la credencial de Google y la envía a `POST /auth/google`.
+El backend verifica la firma, la audiencia, la caducidad, el `sub` de Google y
+que el email esté verificado. Nunca se debe confiar en un email enviado por el
+cliente sin verificar el `id_token`.
+
+Cuando alguien abre un enlace de invitación y pulsa Google:
+
+1. Se valida el token de invitación y su caducidad.
+2. Se busca una cuenta existente por `google_sub` y, si no existe, por email
+   verificado para vincularla sin crear duplicados.
+3. Si no existe, se crea la cuenta con el email de Google y una contraseña
+   aleatoria que no se expone al cliente.
+4. La invitación se asigna a esa cuenta y sigue pendiente hasta que el usuario
+   la acepte desde NotApp.
+
+El enlace de invitación demuestra que la persona tiene acceso al correo al que
+se envió. Por eso, si la invitación fue enviada a `correo-a@example.com` y la
+cuenta de Google usa `correo-b@gmail.com`, ambas cuentas pueden quedar
+vinculadas sin cambiar el email original guardado en la invitación. Si el
+usuario ya tenía una sesión abierta, la página ofrece vincular el enlace a esa
+cuenta.
+
+## Google En Cada Entorno Y Plataforma
+
+Usa un proyecto de Google Cloud y crea clientes OAuth separados para Web, iOS
+y Android. El backend debe permitir todos los client IDs que puedan emitir
+tokens válidos mediante `GOOGLE_WEB_CLIENT_ID`, `GOOGLE_SERVER_CLIENT_ID`,
+`GOOGLE_ANDROID_CLIENT_ID`, `GOOGLE_IOS_CLIENT_ID` o `GOOGLE_CLIENT_IDS`.
+
+- **Dominio web:** añade el origen exacto, por ejemplo
+  `https://notapp.pablovaldazo.es`, en *Authorized JavaScript origins*. Para
+  local añade también `http://localhost:5173`.
+- **Staging:** usa otro origen web y, preferiblemente, otro proyecto o clientes
+  OAuth de pruebas. La web de staging debe apuntar a una API y base de datos de
+  staging.
+- **iOS:** al crear la app nativa habrá que configurar el client ID de iOS, su
+  URL scheme reverso y solicitar un ID token cuya audiencia sea el client ID
+  del servidor. El token se enviará al mismo endpoint `/auth/google`.
+- **Android:** configura el paquete de la aplicación y la huella del
+  certificado de firma; la app debe pedir un ID token para el client ID del
+  servidor y enviarlo al mismo endpoint.
+- **CORS:** `VITE_API_URL` en el backend es la lista de orígenes permitidos,
+  separados por comas. En producción debe incluir el dominio web y los
+  orígenes locales que realmente use Capacitor, nunca `*` junto con
+  credenciales.
+
+Los client IDs no son secretos y pueden aparecer en el frontend. `JWT_SECRET`,
+`DATABASE_URL`, claves SMTP y claves de Cloudinary sí son secretos y solo deben
+vivir en el servidor o en el gestor de secretos del proveedor.
+
+En iOS hay además una condición de App Store: si la app usa Google u otro
+login social para la cuenta principal, normalmente debe ofrecer una opción
+equivalente de **Sign in with Apple**. Conviene implementar Apple antes de
+enviar la primera versión a revisión.
+
+## Registro Con Email Y Contraseña
+
+El registro normal solicita nombre, email y una única contraseña. El servidor
+guarda temporalmente esos datos con el password ya cifrado, envía un código de
+seis cifras y solo crea o activa la cuenta después de verificarlo. El código
+caduca por defecto en 15 minutos; `REGISTRATION_CODE_EXPIRES_MINUTES` acepta
+valores entre 15 y 30. También se puede solicitar el reenvío del código.
+
+Si el email ya pertenece a una cuenta creada con Google, la verificación no
+crea otra cuenta: activa el acceso mediante contraseña sobre el mismo usuario,
+conservando hogares, listas, invitaciones y el vínculo `google_sub`. Las
+cuentas que ya tienen contraseña siguen sin poder sobrescribirse mediante un
+nuevo registro.
+
+## Límites De Peticiones
+
+El servidor devuelve `429` y `Retry-After` cuando se supera un límite. La
+protección base permite 1.000 peticiones por IP cada 15 minutos y cada sesión
+autenticada tiene además un máximo de 600 peticiones cada 15 minutos.
+
+Las rutas sensibles tienen límites más estrictos: login y Google permiten 20
+intentos por IP cada 15 minutos, registro 10 por IP y 3 por email cada hora,
+reenvío de códigos 3 cada 15 minutos, recuperación de contraseña 5 por IP y 3
+por email cada 15 minutos, búsqueda de imágenes 30 por usuario cada 15 minutos
+y operaciones pesadas 60 por usuario cada 15 minutos. El menú público permite
+120 consultas por IP cada 15 minutos. Socket.IO permite 60 conexiones nuevas
+por IP y 120 eventos de listas por usuario cada 15 minutos.
+
+Estos límites se guardan en memoria del proceso. Son adecuados para una única
+instancia del servidor; si se despliega con varias instancias, hay que mover
+los contadores a Redis u otro almacén compartido y mantener el límite del proxy
+o CDN delante del servidor.
+
 ## Instalación Local
 
 1. Instalar dependencias:
@@ -223,6 +321,10 @@ npx prisma generate
 npx prisma db push
 ```
 
+Al desplegar esta versión sobre una base de datos existente, este paso añade
+`User.google_sub`, `User.password_enabled` y `PendingRegistration`. Hazlo
+primero contra staging y verifica el estado antes de aplicarlo en producción.
+
 5. Levantar servidor en desarrollo:
 
 ```bash
@@ -241,8 +343,14 @@ http://localhost:3000
 npm run dev      # arranca el servidor con nodemon
 npm run deploy   # instala dependencias y genera Prisma Client
 npm run db       # aplica el schema con prisma db push
-npm test         # placeholder, no hay suite de tests configurada todavía
+npm test         # ejecuta los tests unitarios del backend
 ```
+
+La suite inicial cubre utilidades puras del backend, como el parseo de
+booleanos y la resolución de planes. Antes de publicar se debe ampliar con
+pruebas de autenticación, permisos, hogares, listas, productos y eliminación
+de cuenta, ejecutadas siempre contra una base de datos de desarrollo o
+staging.
 
 ## Seguridad Y Buenas Prácticas
 
@@ -251,6 +359,8 @@ npm test         # placeholder, no hay suite de tests configurada todavía
 - Las imágenes externas se validan antes de descargarlas.
 - Las claves de búsqueda de imágenes viven en backend, no en frontend.
 - `.env` está en `.gitignore`.
+- `.env.example` solo contiene nombres y valores de ejemplo; las credenciales
+  reales deben configurarse en cada entorno de despliegue.
 - Los hogares tutorial se marcan con `is_tutorial` para diferenciarlos de hogares reales.
 
 ## Estado Del Proyecto
@@ -259,7 +369,7 @@ NotApp es un proyecto funcional en evolución. El backend ya cubre las piezas pr
 
 Puntos que podrían seguir creciendo:
 
-- Tests automatizados.
+- Tests de integración contra una base de datos de staging.
 - Documentación OpenAPI/Swagger.
 - Sistema de planes o límites avanzados.
 - Panel interno de administración.
