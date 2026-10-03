@@ -174,6 +174,7 @@ Variables principales:
 DATABASE_URL=
 JWT_SECRET=
 VITE_API_URL=
+CAPACITOR_ORIGINS=https://localhost,capacitor://localhost,http://localhost
 VITE_API_KEY=
 URL=
 URL_REGISTER=
@@ -256,6 +257,8 @@ tokens válidos mediante `GOOGLE_WEB_CLIENT_ID`, `GOOGLE_SERVER_CLIENT_ID`,
   separados por comas. En producción debe incluir el dominio web y los
   orígenes locales que realmente use Capacitor, nunca `*` junto con
   credenciales.
+- Para Capacitor, `CAPACITOR_ORIGINS` debe incluir `https://localhost` y
+  `capacitor://localhost`, que son los orígenes internos del WebView nativo.
 
 Los client IDs no son secretos y pueden aparecer en el frontend. `JWT_SECRET`,
 `DATABASE_URL`, claves SMTP y claves de Cloudinary sí son secretos y solo deben
