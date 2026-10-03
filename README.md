@@ -349,6 +349,11 @@ npm run db       # aplica el schema con prisma db push
 npm test         # ejecuta los tests unitarios del backend
 ```
 
+Para actualizar una base existente al nuevo flujo de compra, seguir
+[la guía de actualización](docs/actualizacion-ux-2026-10-04.md) y aplicar el SQL
+indicado antes de reiniciar el backend. `npm run deploy` no actualiza la base de
+datos.
+
 La suite inicial cubre utilidades puras del backend, como el parseo de
 booleanos y la resolución de planes. Antes de publicar se debe ampliar con
 pruebas de autenticación, permisos, hogares, listas, productos y eliminación

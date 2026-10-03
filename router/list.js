@@ -1,5 +1,10 @@
 const express = require("express");
 const router = express.Router();
+router.use(require("./shoppingCarry"));
+const { getCarryMap } = require("../utils/shoppingCarry");
+const { shoppingState, ShoppingStateError, integer } = require("../utils/shoppingState");
+const { shoppingTransaction } = require("../utils/shoppingTransaction");
+const { mutationKey, replayMutation, recordMutation } = require("../utils/shoppingMutation");
 const prisma = require("../prisma/prisma");
 const authMiddleware = require("../middleware/auth.middleware");
 const multer = require("multer");
@@ -93,21 +98,7 @@ const getNotFoundCopyMap = async (lists) => {
 
   if (listIds.length === 0) return new Map();
 
-  const copies = await prisma.list.findMany({
-    where: {
-      copied_from_not_found_list_id: {
-        in: listIds,
-      },
-    },
-    select: {
-      id: true,
-      copied_from_not_found_list_id: true,
-    },
-  });
-
-  return new Map(
-    copies.map((copy) => [copy.copied_from_not_found_list_id, copy.id])
-  );
+  return getCarryMap(prisma, listIds);
 };
 
 const addNotFoundCopyFields = (list, copyMap = new Map()) => {
@@ -151,13 +142,11 @@ const normalizeStatus = (status) => {
 };
 
 const parseNonNegativeInteger = (value) => {
-  const parsedValue = Number(value);
-  return Number.isInteger(parsedValue) && parsedValue >= 0 ? parsedValue : null;
+  return integer(value);
 };
 
 const parsePositiveInteger = (value) => {
-  const parsedValue = Number(value);
-  return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : null;
+  return integer(value, 1);
 };
 
 const getPaginationParams = (query) => {
@@ -411,86 +400,32 @@ router.post("/add-item/:id_list", authMiddleware, async (req, res) => {
   const { id_item, quantity, clientMutationId } = req.body;
   const { id_list } = req.params;
   try {
-    if (!id_list || !id_item) {
-      return res.status(400).json({ message: "Faltan datos" });
-    }
-
-    const list = await getAccessibleList(req.user?.id, id_list, {
-      select: {
-        id: true,
-        home_id: true,
-      },
-    });
-
-    if (!list) {
-      return res.status(403).json({
-        message: "No tienes permisos para modificar esta lista",
+    if (!id_list || typeof id_item !== "string" || !id_item) throw new ShoppingStateError("Faltan datos.");
+    const mutationId = mutationKey(clientMutationId);
+    const nextQuantity = quantity === undefined ? 1 : parsePositiveInteger(quantity);
+    if (nextQuantity === null) throw new ShoppingStateError("La cantidad no es válida.");
+    const result = await shoppingTransaction(async tx => {
+      const list = await getAccessibleList(req.user?.id, id_list, { select: { id: true, home_id: true }, tx });
+      if (!list) throw new ShoppingStateError("No tienes permisos para modificar esta lista.", 403);
+      const replay = await replayMutation(tx, { listId: list.id, mutationId, userId: req.user.id, select: itemListSelect });
+      if (replay) return { itemList: replay, reused: true };
+      const item = await tx.item.findFirst({ where: { id: id_item, home_id: list.home_id }, select: { id: true } });
+      if (!item) throw new ShoppingStateError("El producto no pertenece al hogar de la lista.");
+      const pending = await tx.itemList.findMany({ where: { item_id: id_item, list_id: list.id, status: "PENDING" }, select: itemListSelect });
+      const existing = pending.find(row => row.purchased_quantity < row.quantity);
+      const itemList = existing || await tx.itemList.create({
+        data: { item_id: id_item, list_id: list.id, quantity: nextQuantity, purchased_quantity: 0, created_mutation_id: mutationId },
+        select: itemListSelect,
       });
-    }
-
-    const nextQuantity =
-      quantity === undefined ? undefined : parsePositiveInteger(quantity);
-    if (quantity !== undefined && nextQuantity === null) {
-      return res.status(400).json({ message: "La cantidad no es valida" });
-    }
-
-    const item = await prisma.item.findFirst({
-      where: {
-        id: id_item,
-        home_id: list.home_id,
-      },
-      select: {
-        id: true,
-      },
+      await recordMutation(tx, { listId: list.id, mutationId, userId: req.user.id, rowId: itemList.id, operation: "add" });
+      return { itemList, reused: Boolean(existing) };
     });
-
-    if (!item) {
-      return res.status(400).json({
-        message: "El producto no pertenece al hogar de la lista",
-      });
-    }
-
-    const existingItemList = await prisma.itemList.findUnique({
-      where: {
-        item_id_list_id: {
-          item_id: id_item,
-          list_id: id_list,
-        },
-      },
-      select: itemListSelect,
-    });
-
-    if (existingItemList) {
-      return res.json({
-        message: "Producto ya estaba en la lista",
-        itemList: existingItemList,
-        clientMutationId,
-      });
-    }
-
-    const itemList = await prisma.itemList.create({
-      data: {
-        item_id: id_item,
-        list_id: id_list,
-        quantity: nextQuantity,
-        purchased_quantity: 0,
-      },
-      select: itemListSelect,
-    });
-
-    emitToList(req, id_list, "itemlist:created", {
-      ...itemList,
-      clientMutationId,
-    });
-
-    res.json({
-      message: "Producto añadido correctamente",
-      itemList,
-      clientMutationId,
-    });
+    if (!result.reused) emitToList(req, id_list, "itemlist:created", { ...result.itemList, clientMutationId });
+    res.json({ message: result.reused ? "Producto ya estaba en la lista" : "Producto añadido correctamente", ...result, clientMutationId });
   } catch (error) {
+    if (error instanceof ShoppingStateError) return res.status(error.status).json({ success: false, message: error.message });
     console.error(error);
-    res.status(500).json({ message: "Server error" });
+    res.status(500).json({ success: false, message: "No se pudo añadir el producto. Se conservan tus datos." });
   }
 });
 
@@ -527,130 +462,34 @@ router.post("/update-list/:id_list", authMiddleware, async (req, res) => {
   }
 });
 
-router.post(
-  "/update-itemlist/:id_itemList",
-  authMiddleware,
-  async (req, res) => {
-    const { id_itemList } = req.params;
-    const { quantity, purchased_quantity, check_take, status, clientMutationId } =
-      req.body;
-    try {
-      if (!id_itemList) {
-        return res.status(400).json({ message: "Faltan datos" });
-      }
-
+router.post("/update-itemlist/:id_itemList", authMiddleware, async (req, res) => {
+  const { id_itemList } = req.params;
+  const { quantity, quantity_delta, purchased_quantity, check_take, status, clientMutationId } = req.body;
+  try {
+    const mutationId = mutationKey(clientMutationId);
+    const result = await shoppingTransaction(async tx => {
       const itemList = await getAccessibleItemList(req.user?.id, id_itemList, {
-        select: {
-          id: true,
-          item_id: true,
-          list_id: true,
-          quantity: true,
-          purchased_quantity: true,
-          check_take: true,
-          status: true,
-        },
+        select: { id: true, item_id: true, list_id: true, quantity: true, purchased_quantity: true, check_take: true, status: true }, tx,
       });
-
-      if (!itemList) {
-        return res.status(403).json({
-          message: "No tienes permisos para modificar este producto",
-        });
-      }
-
-      const data = {};
-      if (quantity !== undefined) {
-        const nextQuantity = parsePositiveInteger(quantity);
-        if (nextQuantity === null) {
-          return res.status(400).json({ message: "La cantidad no es valida" });
-        }
-
-        if (itemList.quantity !== nextQuantity) data.quantity = nextQuantity;
-      }
-      if (purchased_quantity !== undefined) {
-        const nextPurchasedQuantity =
-          parseNonNegativeInteger(purchased_quantity);
-        if (nextPurchasedQuantity === null) {
-          return res
-            .status(400)
-            .json({ message: "La cantidad comprada no es valida" });
-        }
-
-        if (itemList.purchased_quantity !== nextPurchasedQuantity) {
-          data.purchased_quantity = nextPurchasedQuantity;
-        }
-
-        const targetQuantity = data.quantity ?? itemList.quantity;
-        const nextStatus =
-          nextPurchasedQuantity >= targetQuantity ? "FOUND" : "PENDING";
-        const nextCheckTake = nextStatus === "FOUND";
-
-        if (itemList.status !== nextStatus) data.status = nextStatus;
-        if (itemList.check_take !== nextCheckTake) {
-          data.check_take = nextCheckTake;
-        }
-      }
-      if (check_take !== undefined && purchased_quantity === undefined) {
-        const nextCheckTake = parseBoolean(check_take);
-        if (itemList.check_take !== nextCheckTake) {
-          data.check_take = nextCheckTake;
-        }
-
-        const nextStatus = statusFromCheckTake(nextCheckTake);
-        if (itemList.status !== nextStatus) {
-          data.status = nextStatus;
-        }
-      }
-      if (status !== undefined) {
-        const nextStatus = normalizeStatus(status);
-        if (!nextStatus) {
-          return res.status(400).json({ message: "Estado no valido" });
-        }
-
-        if (itemList.status !== nextStatus) data.status = nextStatus;
-        const nextCheckTake = nextStatus === "FOUND";
-        if (itemList.check_take !== nextCheckTake) {
-          data.check_take = nextCheckTake;
-        }
-        if (
-          nextStatus === "NOT_FOUND" &&
-          purchased_quantity === undefined &&
-          itemList.purchased_quantity !== 0
-        ) {
-          data.purchased_quantity = 0;
-        }
-      }
-
-      const updatedItemList = Object.keys(data).length
-        ? await prisma.itemList.update({
-            where: {
-              id: id_itemList,
-            },
-            data,
-            select: itemListSelect,
-          })
-        : await prisma.itemList.findUnique({
-            where: { id: id_itemList },
-            select: itemListSelect,
-          });
-
-      if (Object.keys(data).length || clientMutationId) {
-        emitToList(req, updatedItemList.list_id, "itemlist:updated", {
-          ...updatedItemList,
-          clientMutationId,
-        });
-      }
-
-      res.json({
-        message: "Producto actualizado correctamente",
-        itemList: updatedItemList,
-        clientMutationId,
-      });
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ message: "Server error" });
-    }
+      if (!itemList) throw new ShoppingStateError("No tienes permisos para modificar este producto.", 403);
+      const replay = await replayMutation(tx, { listId: itemList.list_id, mutationId, userId: req.user.id, select: itemListSelect });
+      if (replay) return { itemList: replay, changed: false, reused: true };
+      const next = shoppingState(itemList, { quantity, quantity_delta, purchased_quantity, check_take, status });
+      const data = Object.fromEntries(Object.entries(next).filter(([key, value]) => itemList[key] !== value));
+      const updated = Object.keys(data).length
+        ? await tx.itemList.update({ where: { id: itemList.id }, data, select: itemListSelect })
+        : await tx.itemList.findUnique({ where: { id: itemList.id }, select: itemListSelect });
+      await recordMutation(tx, { listId: itemList.list_id, mutationId, userId: req.user.id, rowId: updated.id, operation: quantity_delta === undefined ? "update" : "increment" });
+      return { itemList: updated, changed: Boolean(Object.keys(data).length), reused: false };
+    });
+    if (result.changed || clientMutationId) emitToList(req, result.itemList.list_id, "itemlist:updated", { ...result.itemList, clientMutationId });
+    res.json({ message: "Producto actualizado correctamente", itemList: result.itemList, reused: result.reused, clientMutationId });
+  } catch (error) {
+    if (error instanceof ShoppingStateError) return res.status(error.status).json({ success: false, message: error.message });
+    console.error(error);
+    res.status(500).json({ success: false, message: "No se pudo actualizar el producto. Se conservan tus datos." });
   }
-);
+});
 
 router.delete(
   "/delete-itemlist/:id_itemList",

@@ -12,6 +12,7 @@ const cloudinary = require('cloudinary').v2;
 const prisma = require("./prisma/prisma");
 const jwt = require("jsonwebtoken");
 const { getAccessibleList } = require("./utils/permissions");
+const { getCarryMap } = require("./utils/shoppingCarry");
 const { getAllowedGoogleClientIds } = require("./utils/googleAuth");
 const {
   globalApiRateLimiter,
@@ -145,17 +146,8 @@ io.on("connection", (socket) => {
 
       socket.join(`list:${list_id}`);
 
-      const notFoundCopyList = list
-        ? await prisma.list.findFirst({
-            where: {
-              copied_from_not_found_list_id: list.id,
-            },
-            select: {
-              id: true,
-            },
-          })
-        : null;
-      const notFoundCopyListId = notFoundCopyList?.id || null;
+      const carryMap = list ? await getCarryMap(prisma, [list.id]) : new Map();
+      const notFoundCopyListId = carryMap.get(list?.id) || null;
       const syncedList = list
         ? {
             ...list,

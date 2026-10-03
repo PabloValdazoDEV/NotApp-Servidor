@@ -1,6 +1,9 @@
 const express = require("express");
 const router = express.Router();
 const prisma = require("../prisma/prisma");
+const { shoppingTransaction } = require("../utils/shoppingTransaction");
+const { mutationKey, replayMutation, recordMutation } = require("../utils/shoppingMutation");
+const { integer, ShoppingStateError, MAX_QUANTITY } = require("../utils/shoppingState");
 const authMiddleware = require("../middleware/auth.middleware");
 const multer = require("multer");
 const upload = multer({ dest: "uploads/" });
@@ -481,13 +484,18 @@ const parseMissingListImportItems = (rawItems) => {
     const name = String(item?.name || "").trim();
     if (!name) return;
 
-    const quantity = Math.max(Math.floor(Number(item?.quantity) || 1), 1);
+    const quantity = item?.quantity === undefined ? 1 : integer(item.quantity, 1);
+    if (quantity === null) throw new ShoppingStateError("La cantidad de un producto no es válida.");
+    const mutationId = mutationKey(item?.clientMutationId);
     const key = normalizeImportItemNameKey(name);
     const previousItem = groupedItems.get(key);
 
+    const total = (previousItem?.quantity || 0) + quantity;
+    if (total > MAX_QUANTITY) throw new ShoppingStateError("La cantidad supera el máximo permitido.");
     groupedItems.set(key, {
       name: previousItem?.name || name,
-      quantity: (previousItem?.quantity || 0) + quantity,
+      quantity: total,
+      increments: [...(previousItem?.increments || []), { quantity, mutationId }],
     });
   });
 
@@ -1643,106 +1651,57 @@ router.post(
           ).filter((item) => Boolean(item.image))
         : [];
 
-      const result = await prisma.$transaction(async (tx) => {
-        const itemsByName = new Map(existingItemsByName);
-        let createdItemsCount = 0;
-        let createdItemListsCount = 0;
-        let updatedItemListsCount = 0;
-        let imagesCount = 0;
+      const result = await shoppingTransaction(async (tx) => {
+        if (!(await hasHomeAccess(userId, hogar_id, undefined, tx))) throw new ShoppingStateError("No tienes permisos para modificar este hogar.", 403);
+        const currentItems = await tx.item.findMany({ where: { home_id: hogar_id }, select: { id: true, name: true, image: true } });
+        const itemsByName = new Map(currentItems.map(item => [normalizeImportItemNameKey(item.name), item]));
+        let createdItemsCount = 0, createdItemListsCount = 0, updatedItemListsCount = 0, imagesCount = 0;
 
         for (const imageUpdate of existingImageUpdates) {
-          const updatedItem = await tx.item.update({
-            where: {
-              id: imageUpdate.id,
-            },
-            data: {
-              image: imageUpdate.image,
-            },
-            select: {
-              id: true,
-              name: true,
-              image: true,
-            },
-          });
-
-          imagesCount += 1;
-          itemsByName.set(imageUpdate.key, updatedItem);
+          const current = itemsByName.get(imageUpdate.key);
+          if (!current || current.image) continue;
+          const updatedItem = await tx.item.update({ where: { id: current.id }, data: { image: imageUpdate.image }, select: { id: true, name: true, image: true } });
+          imagesCount += 1; itemsByName.set(imageUpdate.key, updatedItem);
         }
-
         for (const item of itemsWithImages) {
+          const key = normalizeImportItemNameKey(item.name);
+          if (itemsByName.has(key)) continue;
           const createdItem = await tx.item.create({
-            data: {
-              home_id: hogar_id,
-              name: item.name,
-              image: item.image || null,
-              description: "",
-              price: "",
-              categories: [],
-              supermarket: "CUALQUIERA",
-              is_recurring: false,
-            },
-            select: {
-              id: true,
-              name: true,
-              image: true,
-            },
+            data: { home_id: hogar_id, name: item.name, image: item.image || null, description: "", price: "", categories: [], supermarket: "CUALQUIERA", is_recurring: false },
+            select: { id: true, name: true, image: true },
           });
-
           createdItemsCount += 1;
           if (createdItem.image) imagesCount += 1;
-          itemsByName.set(normalizeImportItemNameKey(createdItem.name), createdItem);
+          itemsByName.set(key, createdItem);
         }
-
         for (const parsedItem of parsedItems) {
           const item = itemsByName.get(normalizeImportItemNameKey(parsedItem.name));
           if (!item?.id) continue;
-
-          const existingItemList = await tx.itemList.findUnique({
-            where: {
-              item_id_list_id: {
-                item_id: item.id,
-                list_id,
-              },
-            },
-            select: {
-              id: true,
-            },
-          });
-
-          if (existingItemList) {
-            await tx.itemList.update({
-              where: {
-                id: existingItemList.id,
-              },
-              data: {
-                quantity: {
-                  increment: parsedItem.quantity,
-                },
-              },
-            });
+          const unapplied = [], idsInRequest = new Set();
+          for (const increment of parsedItem.increments) {
+            if (increment.mutationId && idsInRequest.has(increment.mutationId)) continue;
+            if (increment.mutationId) idsInRequest.add(increment.mutationId);
+            const replay = await replayMutation(tx, { listId: list_id, mutationId: increment.mutationId, userId });
+            if (!replay) unapplied.push(increment);
+          }
+          if (!unapplied.length) continue;
+          const quantity = unapplied.reduce((sum, increment) => sum + increment.quantity, 0);
+          const pending = await tx.itemList.findMany({ where: { item_id: item.id, list_id, status: "PENDING" } });
+          const existing = pending.find(row => row.purchased_quantity < row.quantity);
+          if (existing && existing.quantity + quantity > MAX_QUANTITY) throw new ShoppingStateError("La cantidad supera el máximo permitido.");
+          let row;
+          if (existing) {
+            row = await tx.itemList.update({ where: { id: existing.id }, data: { quantity: { increment: quantity } } });
             updatedItemListsCount += 1;
           } else {
-            await tx.itemList.create({
-              data: {
-                item_id: item.id,
-                list_id,
-                quantity: parsedItem.quantity,
-                purchased_quantity: 0,
-                check_take: false,
-                status: "PENDING",
-              },
-            });
+            row = await tx.itemList.create({ data: { item_id: item.id, list_id, quantity, purchased_quantity: 0, check_take: false, status: "PENDING", created_mutation_id: unapplied[0].mutationId } });
             createdItemListsCount += 1;
           }
+          for (const increment of unapplied) await recordMutation(tx, { listId: list_id, mutationId: increment.mutationId, userId, rowId: row.id, operation: "import" });
         }
-
-        return {
-          createdItemsCount,
-          createdItemListsCount,
-          updatedItemListsCount,
-          imagesCount,
-        };
+        return { createdItemsCount, createdItemListsCount, updatedItemListsCount, imagesCount };
       });
+      req.app.get("io")?.to(`list:${list_id}`).emit("list:changed", { list_id });
 
       return res.json({
         success: true,
@@ -1766,6 +1725,7 @@ router.post(
         warning: imageImportPlan.warning,
       });
     } catch (error) {
+      if (error instanceof ShoppingStateError) return res.status(error.status).json({ success: false, message: error.message });
       console.error(error);
       res.status(500).json({ message: "Server error" });
     }

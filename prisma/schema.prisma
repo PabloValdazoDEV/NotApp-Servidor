@@ -166,6 +166,8 @@ model List {
   listCheck                     Boolean    @default(false)
   copied_from_not_found_list_id String?
   itemsList                     ItemList[]
+  outgoingCarry                 ShoppingCarry? @relation("ShoppingCarrySource")
+  incomingCarries               ShoppingCarry[] @relation("ShoppingCarryTarget")
   home                          Home       @relation(fields: [home_id], references: [id], onDelete: Cascade)
   createdAt                     DateTime?  @default(now())
   updatedAt                     DateTime?  @updatedAt
@@ -179,12 +181,14 @@ model ItemList {
   purchased_quantity Int              @default(0)
   check_take         Boolean          @default(false)
   status             ITEM_LIST_STATUS @default(PENDING)
+  created_mutation_id String?
   list               List             @relation(fields: [list_id], references: [id], onDelete: Cascade)
   item               Item             @relation(fields: [item_id], references: [id], onDelete: Cascade)
   createdAt          DateTime?        @default(now())
   updatedAt          DateTime?        @updatedAt
 
-  @@unique([item_id, list_id])
+  @@index([item_id, list_id])
+  @@unique([list_id, created_mutation_id])
 }
 
 model Item {
@@ -271,4 +275,33 @@ model PendingRegistration {
   updatedAt     DateTime @updatedAt
 
   @@index([expiresAt])
+}
+
+// Keeps the source result and records only the units added to the destination.
+model ShoppingCarry {
+  id                 String   @id @default(uuid())
+  source_list_id     String   @unique
+  target_list_id     String
+  created_by_user_id String?
+  created_target    Boolean  @default(false)
+  deltas             Json
+  undone_at          DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  source             List @relation("ShoppingCarrySource", fields: [source_list_id], references: [id], onDelete: Cascade)
+  target             List @relation("ShoppingCarryTarget", fields: [target_list_id], references: [id], onDelete: Cascade)
+  @@index([target_list_id])
+}
+
+// An acknowledgement retry returns the current row instead of applying an add twice.
+model ShoppingMutation {
+  id            String @id @default(uuid())
+  list_id       String
+  mutation_id   String
+  user_id       String
+  item_list_id  String
+  operation     String
+  createdAt     DateTime @default(now())
+  @@unique([list_id, mutation_id])
+  @@index([item_list_id])
 }
