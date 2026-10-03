@@ -14,6 +14,10 @@ const {
 } = require("../utils/googleAuth");
 const { getInvitationContext } = require("../utils/invitationToken");
 const {
+  attachRegistrationInvitation,
+  getRegistrationInvitationContext,
+} = require("../utils/publicHomeInvite");
+const {
   completePendingRegistration,
   createPendingRegistration,
   findUserByEmail,
@@ -37,7 +41,10 @@ const {
 } = require("../middleware/rateLimit");
 require("dotenv").config();
 
-const register = process.env.URL_REGISTER;
+const configuredRegisterPath = process.env.URL_REGISTER?.trim();
+const registerPaths = ["/register", configuredRegisterPath].filter(
+  (path, index, paths) => path && paths.indexOf(path) === index
+);
 const mailFrom = process.env.MAIL_FROM || '"NotApp" <no-reply@notapp.com>';
 
 const createSessionToken = (user, authProvider = "password") =>
@@ -59,11 +66,11 @@ const createHttpError = (message, status = 400) => {
 };
 
 router.post(
-  register,
+  registerPaths,
   registrationIpRateLimiter,
   registrationAccountRateLimiter,
   async (req, res) => {
-  const { name, email, password } = req.body || {};
+  const { name, email, password, inviteToken = null } = req.body || {};
   const validationError = validateRegistrationData({ name, email, password });
   if (validationError) {
     return res.status(400).json({ message: validationError });
@@ -71,6 +78,7 @@ router.post(
 
   const emailClean = normalizeEmail(email);
   try {
+    await getRegistrationInvitationContext(inviteToken);
     const existingUser = await findUserByEmail(emailClean);
     if (existingUser && existingUser.password_enabled !== false) {
       return res.status(400).json({ message: "El email ya está registrado" });
@@ -80,6 +88,7 @@ router.post(
       name,
       email: emailClean,
       password,
+      inviteToken,
     });
 
     await sendRegistrationCodeEmail({
@@ -87,6 +96,7 @@ router.post(
       name,
       code: registration.code,
       expiresInMinutes: registration.expiresInMinutes,
+      inviteToken,
     });
 
     return res.json({
@@ -95,6 +105,9 @@ router.post(
       expires_in_minutes: registration.expiresInMinutes,
     });
   } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
     console.error(error);
     return res.status(500).json({ message: "No se pudo iniciar el registro" });
   }
@@ -107,9 +120,9 @@ router.post("/auth/google", googleLoginRateLimiter, async (req, res) => {
 
   try {
     const googleProfile = await verifyGoogleIdToken(idToken);
-    const invitationContext = await getInvitationContext(inviteToken);
+    const invitationContext = await getRegistrationInvitationContext(inviteToken);
 
-    const user = await prisma.$transaction(async (tx) => {
+    const { user, joinedHomeId } = await prisma.$transaction(async (tx) => {
       const userByGoogle = await tx.user.findUnique({
         where: { google_sub: googleProfile.sub },
       });
@@ -148,24 +161,19 @@ router.post("/auth/google", googleLoginRateLimiter, async (req, res) => {
         });
       }
 
-      if (invitationContext) {
-        await tx.invitation.update({
-          where: { id: invitationContext.invitation.id },
-          data: { user_id: currentUser.id },
-        });
-        await tx.oneTimeToken.update({
-          where: { id: invitationContext.tokenRecord.id },
-          data: { used: true },
-        });
-      }
-
-      return currentUser;
+      const joinedHomeId = await attachRegistrationInvitation(
+        invitationContext,
+        currentUser,
+        tx
+      );
+      return { user: currentUser, joinedHomeId };
     });
 
     return res.json({
       message: "Google conectado correctamente",
       token: createSessionToken(user, "google"),
       invitationLinked: Boolean(invitationContext),
+      joinedHomeId,
     });
   } catch (error) {
     if (error.code === "GOOGLE_NOT_CONFIGURED") {
@@ -206,6 +214,7 @@ router.post(
     return res.json({
       message: "Usuario registrado correctamente",
       token: createSessionToken(user, "password"),
+      joinedHomeId: user.joinedHomeId || null,
     });
   } catch (error) {
     if (error.status) {

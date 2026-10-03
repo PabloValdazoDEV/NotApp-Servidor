@@ -17,9 +17,13 @@ const {
   sendRegistrationCodeEmail,
   validateRegistrationData,
 } = require("../utils/registration");
+const { getHomeLimits } = require("../utils/plans");
+const {
+  attachRegistrationInvitation,
+  getPublicInvitePayload,
+} = require("../utils/publicHomeInvite");
 require("dotenv").config();
 
-const MAX_HOME_MEMBERS = 8;
 const ADMIN_ROLES = ["OWNER", "ADMIN"];
 const MEMBER_ROLES = ["OWNER", "ADMIN", "MEMBER"];
 const mailFrom = process.env.MAIL_FROM || '"NotApp" <no-reply@notapp.com>';
@@ -95,6 +99,144 @@ router.post(
   }
 );
 
+router.get("/public-invite/:token", async (req, res) => {
+  const decoded = getPublicInvitePayload(req.params.token);
+
+  if (!decoded) {
+    return res.status(400).json({
+      success: false,
+      message: "El enlace de invitación no es válido o ha caducado",
+    });
+  }
+
+  try {
+    const home = await prisma.home.findUnique({
+      where: { id: decoded.home_id },
+      select: { id: true, name: true, members: { select: { id: true } } },
+    });
+
+    if (!home) {
+      return res.status(404).json({
+        success: false,
+        message: "El hogar ya no existe",
+      });
+    }
+
+    const limits = await getHomeLimits(home.id);
+
+    return res.json({
+      success: true,
+      home: {
+        id: home.id,
+        name: home.name,
+        isFull: home.members.length >= limits.maxMembers,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.post(
+  "/public-invite/create/:homeId",
+  authMiddleware,
+  async (req, res) => {
+    const { homeId } = req.params;
+
+    if (!(await isHomeAdmin(req.user?.id, homeId))) {
+      return res.status(403).json({
+        success: false,
+        message: "No tienes permisos para invitar a este hogar",
+      });
+    }
+
+    try {
+      const home = await prisma.home.findUnique({
+        where: { id: homeId },
+        select: { id: true, name: true },
+      });
+
+      if (!home) {
+        return res.status(404).json({
+          success: false,
+          message: "El hogar no existe",
+        });
+      }
+
+      const token = jwt.sign(
+        { home_id: home.id, purpose: "public-home-invite" },
+        process.env.JWT_SECRET,
+        { expiresIn: "30d" }
+      );
+
+      return res.json({
+        success: true,
+        token,
+        home,
+        expiresInDays: 30,
+      });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+router.post("/public-invite/:token/join", authMiddleware, async (req, res) => {
+  const decoded = getPublicInvitePayload(req.params.token);
+
+  if (!decoded) {
+    return res.status(400).json({
+      success: false,
+      message: "El enlace de invitación no es válido o ha caducado",
+    });
+  }
+
+  try {
+    const home = await prisma.home.findUnique({
+      where: { id: decoded.home_id },
+      select: { id: true, name: true },
+    });
+
+    if (!home) {
+      return res.status(404).json({ success: false, message: "El hogar no existe" });
+    }
+
+    const alreadyMember = await prisma.$transaction(async (tx) => {
+      // Use the same capacity lock as registration and Google sign-in.
+      const currentMember = await tx.member.findFirst({
+        where: { user_id: req.user.id, home_id: home.id },
+      });
+      await attachRegistrationInvitation(
+        { publicHomeId: home.id },
+        { id: req.user.id },
+        tx
+      );
+      return Boolean(currentMember);
+    });
+    if (alreadyMember) {
+      return res.json({
+        success: true,
+        alreadyMember: true,
+        message: `Ya perteneces a ${home.name}`,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: `Te has unido a ${home.name}`,
+      home_id: home.id,
+    });
+  } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ success: false, message: error.message });
+    }
+    console.error(error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 router.post("/invite-check", authMiddleware, async (req, res) => {
   const { id_invitation, accept } = req.body;
   try {
@@ -146,10 +288,12 @@ router.post("/invite-check", authMiddleware, async (req, res) => {
         where: { home_id: invitation.home_id },
       });
 
-      if (memberCount >= MAX_HOME_MEMBERS) {
+      const limits = await getHomeLimits(invitation.home_id);
+
+      if (memberCount >= limits.maxMembers) {
         return res.status(400).json({
           success: false,
-          message: "Un hogar puede tener como máximo 8 miembros",
+          message: `Un hogar ${limits.plan === "FREE" ? "Free" : "Premium"} puede tener como máximo ${limits.maxMembers} miembros`,
         });
       }
 
@@ -360,10 +504,11 @@ router.post("/invite/:id_hogar", authMiddleware, async (req, res) => {
       });
     }
 
-    if (home.members.length + home.invitations.length >= MAX_HOME_MEMBERS) {
+    const limits = await getHomeLimits(id_hogar);
+    if (home.members.length + home.invitations.length >= limits.maxMembers) {
       return res.status(400).json({
         success: false,
-        message: "Un hogar puede tener como máximo 8 miembros",
+        message: `Un hogar ${limits.plan === "FREE" ? "Free" : "Premium"} puede tener como máximo ${limits.maxMembers} miembros`,
       });
     }
 

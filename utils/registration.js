@@ -3,7 +3,10 @@ const bcrypt = require("bcrypt");
 const prisma = require("../prisma/prisma");
 const transporter = require("../config/nodemailer");
 const { renderEmail, getEmailAttachments } = require("../config/emailTemplate");
-const { getInvitationContext } = require("./invitationToken");
+const {
+  attachRegistrationInvitation,
+  getRegistrationInvitationContext,
+} = require("./publicHomeInvite");
 
 const DEFAULT_CODE_EXPIRY_MINUTES = 15;
 const MAX_CODE_ATTEMPTS = 5;
@@ -206,7 +209,7 @@ const completePendingRegistration = async ({ email, code, inviteToken }) => {
 
   const effectiveInviteToken = pending.invite_token || inviteToken;
   const invitationContext = effectiveInviteToken
-    ? await getInvitationContext(effectiveInviteToken)
+    ? await getRegistrationInvitationContext(effectiveInviteToken)
     : null;
 
   const user = await prisma.$transaction(async (tx) => {
@@ -236,19 +239,13 @@ const completePendingRegistration = async ({ email, code, inviteToken }) => {
           },
         });
 
-    if (invitationContext) {
-      await tx.invitation.update({
-        where: { id: invitationContext.invitation.id },
-        data: { user_id: currentUser.id },
-      });
-      await tx.oneTimeToken.update({
-        where: { id: invitationContext.tokenRecord.id },
-        data: { used: true },
-      });
-    }
-
+    const joinedHomeId = await attachRegistrationInvitation(
+      invitationContext,
+      currentUser,
+      tx
+    );
     await tx.pendingRegistration.delete({ where: { id: pending.id } });
-    return currentUser;
+    return { ...currentUser, joinedHomeId };
   });
 
   return user;
