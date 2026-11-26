@@ -7,8 +7,8 @@
         "test": "node --test",
         "dev": "nodemon --watch .env app.js",
         "seed": "node prisma/seed.js",
-        "deploy": "npm install && npx prisma generate",
-        "db": "npx prisma db push",
+        "deploy": "npm install && prisma generate",
+        "db": "prisma db push",
         "db:menus": "prisma db execute --schema prisma/schema.prisma --file prisma/updates/20261126_menus_recetas.sql"
     },
     "keywords": [],
