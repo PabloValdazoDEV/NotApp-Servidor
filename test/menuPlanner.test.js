@@ -11,6 +11,7 @@ const {
   nameKey,
   normalizeUnit,
   parseIngredientLine,
+  parseMenuText,
   parseRecipeText,
   roundToPack,
   sanitizeRecipeInput,
@@ -230,5 +231,41 @@ describe("sanitizeRecipeInput", () => {
   it("rejects bad quantities", () => {
     assert.throws(() => sanitizeRecipeInput({ name: "X", ingredients: [{ name: "Pan", quantity: -1, unit: "UD" }] }), /Cantidad/);
     assert.throws(() => sanitizeRecipeInput({ name: "" }), /nombre/);
+  });
+});
+
+describe("parseMenuText", () => {
+  const mealTypes = [{ id: "lunch", name: "Comida" }, { id: "dinner", name: "Cena" }];
+
+  it("reads days, meals and several dishes per meal", () => {
+    const { days, warnings } = parseMenuText("**LUNES 30/11**\n- Comida: lentejas + Ensalada\n- Cena: Tortilla de patatas.\nMiércoles (2 de diciembre)\nAlmuerzo: Pollo al horno; -", mealTypes);
+    assert.deepEqual(warnings, []);
+    assert.equal(days.length, 2);
+    assert.equal(days[0].day, 0);
+    assert.deepEqual(days[0].meals[0].dishes.map((dish) => dish.title), ["Lentejas", "Ensalada"]);
+    assert.equal(days[0].meals[1].meal_type_id, "dinner");
+    assert.equal(days[0].meals[1].dishes[0].title, "Tortilla de patatas");
+    assert.equal(days[1].day, 2);
+    assert.equal(days[1].meals[0].meal_type_id, "lunch");
+    assert.equal(days[1].meals[0].dishes.length, 1);
+  });
+
+  it("detects leftovers, eating out and meals on the same line as the day", () => {
+    const { days } = parseMenuText("Martes: Comida: Sobras de las lentejas con verduras\nCena - Fuera (cumple)", mealTypes);
+    const [lunch, dinner] = days[0].meals;
+    assert.equal(lunch.dishes[0].kind, "LEFTOVER");
+    assert.equal(lunch.dishes[0].source, "Lentejas con verduras");
+    assert.equal(dinner.dishes[0].kind, "OUT");
+  });
+
+  it("warns about unknown meals and splits off pasted recipes", () => {
+    const result = parseMenuText("```\nJUEVES\nMerienda: Fruta\nCena: Crema\n\nRECETA: Crema\nRACIONES: 2\n```", mealTypes);
+    assert.equal(result.days[0].meals.length, 1);
+    assert.match(result.warnings[0], /Merienda/);
+    assert.match(result.recipeText, /^\s*RECETA: Crema/);
+  });
+
+  it("fails when there is no day", () => {
+    assert.throws(() => parseMenuText("Comida: lentejas", mealTypes), /ningún día/);
   });
 });

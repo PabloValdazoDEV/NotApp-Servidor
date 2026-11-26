@@ -552,6 +552,127 @@ const parseRecipeText = (text) => {
   });
 };
 
+// ---------------------------------------------------------------------------
+// Menú semanal pegado (por ejemplo, desde ChatGPT):
+//   LUNES
+//   Comida: Lentejas con verduras + Ensalada
+//   Cena: Sobras de lentejas
+// Las comidas se buscan entre las del hogar. Si después vienen bloques
+// «RECETA:», se leen con parseRecipeText.
+// ---------------------------------------------------------------------------
+const WEEK_DAYS = ["lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"];
+const MEAL_ALIASES = { almuerzo: "comida", merienda: "merienda", desayuno: "desayuno" };
+const EMPTY_DISH = /^(-+|—|nada|libre|ninguno|sin planificar|vacio|\(vacio\)|n\/a)$/;
+const OUT_DISH = /^(fuera|comer fuera|comemos fuera|como fuera|cenar fuera|cenamos fuera|ceno fuera|come fuera|cena fuera|restaurante)\b/;
+const LEFTOVER_DISH = /^(sobras|restos|taper|tapper|tupper|tuper|tapers|tappers|tuppers)\s+(?:de\s+)?(?:(?:la|el|los|las)\s+)?(.+)$/;
+const RECIPE_START = /^\s*(?:#+\s*)?(?:\*\*)?\s*(?:RECETA|NOMBRE)\s*:/im;
+
+const cleanLine = (raw) => raw.trim().replace(/^#+\s*/, "").replace(/\*\*|__/g, "").replace(/^[-*•·]\s+/, "").trim();
+const looseKey = (value = "") => stripAccents(String(value)).toLowerCase().replace(/[^a-z0-9ñ ]+/g, " ").replace(/\s+/g, " ").trim();
+
+const findDay = (line) => {
+  const key = looseKey(line);
+  const day = WEEK_DAYS.findIndex((name) => key === name || key.startsWith(`${name} `));
+  if (day < 0) return null;
+  // Lo que va tras el nombre del día: fecha opcional y, a veces, la comida en la misma línea.
+  const rest = line
+    .replace(/^[^\s:–—-]+/, "")
+    .replace(/^[\s,]*(\(?\d{1,2}([/.-]\d{1,2}([/.-]\d{2,4})?|\s+(de\s+)?[a-záéíóú]+)?\)?)?/i, "")
+    .replace(/^\s*[:–—-]\s*/, "")
+    .trim();
+  return { day, rest };
+};
+
+const splitDishes = (value) =>
+  value.split(/\s+\+\s+|\s*;\s*/).map((dish) => dish.trim().replace(/[.。]+$/, "").trim()).filter(Boolean);
+
+const classifyDish = (text) => {
+  const key = looseKey(text);
+  if (!key || EMPTY_DISH.test(key)) return null;
+  if (OUT_DISH.test(key)) return { kind: "OUT", title: text.slice(0, MAX_NAME) };
+  const leftover = key.match(LEFTOVER_DISH);
+  if (leftover) {
+    const words = text.trim().split(/\s+/);
+    const skip = key.split(" ").length - leftover[2].split(" ").length;
+    const source = words.slice(skip).join(" ") || leftover[2];
+    return { kind: "LEFTOVER", title: text.slice(0, MAX_NAME), source: source.charAt(0).toUpperCase() + source.slice(1) };
+  }
+  return { kind: "DISH", title: (text.charAt(0).toUpperCase() + text.slice(1)).slice(0, MAX_NAME) };
+};
+
+// mealTypes: [{ id, name }]. Devuelve { days: [{ day, meals: [{ meal_type_id, name, dishes }] }], warnings, recipeText }.
+const parseMenuText = (text, mealTypes = []) => {
+  const source = extractCodeBlocks(text);
+  if (source.length > 60000) throw new MenuInputError("El texto es demasiado largo");
+  const recipeAt = source.search(RECIPE_START);
+  const menuPart = recipeAt >= 0 ? source.slice(0, recipeAt) : source;
+  const recipeText = recipeAt >= 0 ? source.slice(recipeAt) : "";
+
+  const mealByKey = new Map();
+  for (const type of mealTypes) mealByKey.set(looseKey(type.name), type);
+  const findMeal = (label) => {
+    const key = looseKey(label);
+    return mealByKey.get(key) || mealByKey.get(MEAL_ALIASES[key] || "") || null;
+  };
+
+  const days = new Map();
+  const warnings = [];
+  const unknownMeals = new Set();
+  let current = null;
+  let dishCount = 0;
+
+  const addMeal = (label, value) => {
+    const type = findMeal(label);
+    if (!type) {
+      unknownMeals.add(label.trim());
+      return;
+    }
+    const dishes = splitDishes(value).map(classifyDish).filter(Boolean);
+    if (!dishes.length) return;
+    let meal = current.meals.find((item) => item.meal_type_id === type.id);
+    if (!meal) {
+      meal = { meal_type_id: type.id, name: type.name, dishes: [] };
+      current.meals.push(meal);
+    }
+    for (const dish of dishes) {
+      if (dishCount >= 80) return;
+      meal.dishes.push(dish);
+      dishCount += 1;
+    }
+  };
+
+  for (const rawLine of menuPart.split(/\r?\n/)) {
+    const line = cleanLine(rawLine);
+    if (!line) continue;
+    const dayMatch = findDay(line);
+    if (dayMatch) {
+      current = days.get(dayMatch.day) || { day: dayMatch.day, meals: [] };
+      days.set(dayMatch.day, current);
+      const inline = dayMatch.rest.match(/^(.{1,40}?)\s*:\s*(.+)$/);
+      if (inline) addMeal(inline[1], inline[2]);
+      continue;
+    }
+    if (!current) continue;
+    const meal = line.match(/^(.{1,40}?)\s*(?::|\s[–—-]\s)\s*(.+)$/);
+    if (meal) addMeal(meal[1], meal[2]);
+  }
+
+  if (!days.size) {
+    throw new MenuInputError("No encuentro ningún día. Empieza cada día con su nombre, por ejemplo «LUNES».");
+  }
+  if (unknownMeals.size) {
+    const names = [...unknownMeals].slice(0, 5).map((name) => `«${name}»`).join(", ");
+    warnings.push(`${names} no ${unknownMeals.size === 1 ? "es una comida" : "son comidas"} de tu hogar. ${unknownMeals.size === 1 ? "Añádela" : "Añádelas"} en Ajustes del menú si ${unknownMeals.size === 1 ? "la quieres" : "las quieres"}.`);
+  }
+  if (dishCount >= 80) warnings.push("Solo se importan los 80 primeros platos.");
+
+  return {
+    days: [...days.values()].sort((a, b) => a.day - b.day),
+    warnings,
+    recipeText,
+  };
+};
+
 module.exports = {
   DISH_KINDS,
   UNITS,
@@ -570,6 +691,7 @@ module.exports = {
   normalizeName,
   normalizeUnit,
   parseIngredientLine,
+  parseMenuText,
   parseRecipeText,
   roundToPack,
   sanitizeRecipeInput,

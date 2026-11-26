@@ -16,6 +16,8 @@ const router = express.Router();
 
 const MAX_RANGE_DAYS = 31;
 const MAX_MEAL_TYPES = 12;
+// Platos que se cocinan y pueden dejar táperes para otro día.
+const TAPER_KINDS = ["RECIPE", "FREE"];
 const CATEGORY_VALUES = new Set(Object.values(CATEGORY || {}));
 
 const fail = (message, status = 400) => {
@@ -166,7 +168,7 @@ router.get("/home/:home_id/week", handle(async (req, res) => {
     include: D.dishInclude,
   });
 
-  const sources = dishes.filter((dish) => dish.kind === "RECIPE" && dish.extra_servings > 0);
+  const sources = dishes.filter((dish) => TAPER_KINDS.includes(dish.kind) && dish.extra_servings > 0);
   const used = await remainingLeftovers(sources.map((dish) => dish.id));
 
   const usedTypeIds = [...new Set(dishes.map((dish) => dish.meal_type_id))];
@@ -185,7 +187,7 @@ router.get("/home/:home_id/week", handle(async (req, res) => {
     hidden_meal_types: extraTypes,
     dishes: dishes.map((dish) => ({
       ...D.serializeDish(dish),
-      leftovers_remaining: dish.kind === "RECIPE" && dish.extra_servings > 0
+      leftovers_remaining: TAPER_KINDS.includes(dish.kind) && dish.extra_servings > 0
         ? Math.max(0, dish.extra_servings - (used.get(dish.id) || 0))
         : 0,
     })),
@@ -201,7 +203,7 @@ router.get("/home/:home_id/leftovers", handle(async (req, res) => {
   const sources = await prisma.plannedDish.findMany({
     where: {
       home_id: home.id,
-      kind: "RECIPE",
+      kind: { in: TAPER_KINDS },
       extra_servings: { gt: 0 },
       date: { gte: D.isoToDbDate(D.addDays(date, -14)), lte: D.isoToDbDate(date) },
     },
@@ -251,7 +253,7 @@ const buildDishData = async (homeId, input, existing = null) => {
     time,
     notes: P.cleanText(merged.notes, 1000),
     guests: P.clampInt(merged.guests, 0, 50, 0),
-    extra_servings: kind === "RECIPE" ? P.clampInt(merged.extra_servings, 0, 50, 0) : 0,
+    extra_servings: TAPER_KINDS.includes(kind) ? P.clampInt(merged.extra_servings, 0, 50, 0) : 0,
     recipe_id: null,
     leftover_of_id: null,
     title: null,
@@ -276,7 +278,7 @@ const buildDishData = async (homeId, input, existing = null) => {
   } else if (kind === "LEFTOVER") {
     if (merged.leftover_of_id) {
       const source = await prisma.plannedDish.findFirst({
-        where: { id: String(merged.leftover_of_id), home_id: homeId, kind: "RECIPE" },
+        where: { id: String(merged.leftover_of_id), home_id: homeId, kind: { in: TAPER_KINDS } },
         select: { id: true, title: true, date: true },
       });
       if (!source) fail("Ese táper no existe");
@@ -842,6 +844,308 @@ router.post("/home/:home_id/recipes/import", expensiveUserRateLimiter, handle(as
 }));
 
 // ---------------------------------------------------------------------------
+// Importar el menú de una semana pegado como texto (por ejemplo, desde ChatGPT).
+// La vista previa y el guardado usan el mismo plan, calculado en el servidor.
+// ---------------------------------------------------------------------------
+const MENU_IMPORT_LEFTOVER_DAYS = 14;
+const sameDishName = (a, b) => {
+  const left = P.nameKey(a);
+  const right = P.nameKey(b);
+  return Boolean(left && right) && (left === right || left.includes(right) || right.includes(left));
+};
+
+const planMenuImport = async (home, body = {}) => {
+  const weekStart = D.weekStartOf(requireIsoDate(body.week_start, "La semana"));
+  const weekEnd = D.addDays(weekStart, 6);
+  const mode = body.mode === "add" ? "add" : "replace";
+  const mealTypes = await D.getMealTypes(home.id);
+  const mealPosition = new Map(mealTypes.map((type, index) => [type.id, index]));
+  const parsed = P.parseMenuText(body.text, mealTypes);
+  const warnings = [...parsed.warnings];
+
+  let pasted = [];
+  if (parsed.recipeText.trim()) {
+    try {
+      pasted = P.parseRecipeText(parsed.recipeText);
+    } catch (error) {
+      if (!(error instanceof P.MenuInputError)) throw error;
+      warnings.push("No he podido leer las recetas que venían después del menú.");
+    }
+  }
+
+  const [existingRecipes, people, weekDishes] = await Promise.all([
+    prisma.recipe.findMany({ where: { home_id: home.id }, select: { id: true, name: true, servings: true } }),
+    D.getHomePeople(home.id),
+    prisma.plannedDish.findMany({
+      where: { home_id: home.id, date: { gte: D.isoToDbDate(weekStart), lte: D.isoToDbDate(weekEnd) } },
+      select: { id: true, date: true, meal_type_id: true, position: true },
+    }),
+  ]);
+  const recipeByKey = new Map(existingRecipes.map((recipe) => [P.nameKey(recipe.name), recipe]));
+  const newRecipes = [];
+  const reusedRecipes = [];
+  const newByKey = new Map();
+  for (const recipe of pasted) {
+    const key = P.nameKey(recipe.name);
+    if (!key || newByKey.has(key)) continue;
+    if (recipeByKey.has(key)) {
+      reusedRecipes.push(recipeByKey.get(key).name);
+      continue;
+    }
+    const entry = { ...recipe, key };
+    newByKey.set(key, entry);
+    newRecipes.push(entry);
+  }
+
+  const accept = new Set(Array.isArray(body.accept_suggestions) ? body.accept_suggestions.map(String) : []);
+  const suggestionPool = [
+    ...existingRecipes.map((recipe) => ({ ...recipe, status: "existing" })),
+    ...newRecipes.map((recipe) => ({ name: recipe.name, servings: recipe.servings, key: recipe.key, status: "new" })),
+  ];
+
+  // Platos en orden: por día y, dentro del día, por el orden de las comidas del hogar.
+  const entries = [];
+  for (const day of parsed.days) {
+    const date = D.addDays(weekStart, day.day);
+    const meals = [...day.meals].sort((a, b) => mealPosition.get(a.meal_type_id) - mealPosition.get(b.meal_type_id));
+    for (const meal of meals) {
+      meal.dishes.forEach((dish, index) => {
+        const entry = {
+          key: `${date}|${meal.meal_type_id}|${index}`,
+          date,
+          meal_type_id: meal.meal_type_id,
+          meal_name: meal.name,
+          kind: dish.kind,
+          title: dish.title,
+          written: dish.title,
+          source: dish.source || null,
+          recipe: null,
+          suggestion: null,
+          leftover: null,
+          consumers: 0,
+        };
+        if (dish.kind === "DISH") {
+          const key = P.nameKey(dish.title);
+          const existing = recipeByKey.get(key);
+          const fresh = newByKey.get(key);
+          if (existing) entry.recipe = { id: existing.id, name: existing.name, servings: existing.servings, status: "existing" };
+          else if (fresh) entry.recipe = { key: fresh.key, name: fresh.name, servings: fresh.servings, status: "new" };
+          else {
+            const match = P.matchProduct(dish.title, suggestionPool);
+            if (match.suggestion) {
+              const { id, key: newKey, name, servings, status } = match.suggestion;
+              entry.suggestion = { id: id || null, key: newKey || null, name, servings, status };
+              if (accept.has(entry.key)) entry.recipe = entry.suggestion;
+            }
+          }
+          entry.kind = entry.recipe ? "RECIPE" : "FREE";
+          if (entry.recipe) entry.title = entry.recipe.name;
+        }
+        entries.push(entry);
+      });
+    }
+  }
+  if (!entries.length) fail("No encuentro ningún plato en el texto. Escribe cada comida como «Comida: Lentejas».");
+
+  const slotKey = (date, mealTypeId) => `${date}|${mealTypeId}`;
+  const affectedSlots = new Set(entries.map((entry) => slotKey(entry.date, entry.meal_type_id)));
+  const replaced = weekDishes.filter((dish) => affectedSlots.has(slotKey(D.dbDateToIso(dish.date), dish.meal_type_id)));
+  const replacedIds = new Set(mode === "replace" ? replaced.map((dish) => dish.id) : []);
+
+  // Sobras: se enlazan con el plato del que salen (de este menú o ya planificado antes).
+  const householdSize = Math.max(1, D.householdSizeOf(people));
+  const leftovers = entries.filter((entry) => entry.kind === "LEFTOVER");
+  let previous = [];
+  if (leftovers.length) {
+    previous = await prisma.plannedDish.findMany({
+      where: {
+        home_id: home.id,
+        kind: { in: TAPER_KINDS },
+        date: { gte: D.isoToDbDate(D.addDays(weekStart, -MENU_IMPORT_LEFTOVER_DAYS)), lte: D.isoToDbDate(weekEnd) },
+        ...(replacedIds.size ? { id: { notIn: [...replacedIds] } } : {}),
+      },
+      orderBy: [{ date: "desc" }],
+      select: { id: true, title: true, date: true },
+    });
+  }
+  entries.forEach((entry, index) => {
+    if (entry.kind !== "LEFTOVER") return;
+    const fromMenu = entries
+      .slice(0, index)
+      .reverse()
+      .find((candidate) => TAPER_KINDS.includes(candidate.kind)
+        && (sameDishName(candidate.title, entry.source) || sameDishName(candidate.written, entry.source)));
+    if (fromMenu) {
+      fromMenu.consumers += householdSize;
+      entry.leftover = { index: entries.indexOf(fromMenu), title: fromMenu.title, date: fromMenu.date };
+      entry.title = fromMenu.title;
+      return;
+    }
+    const before = previous.find((dish) => D.dbDateToIso(dish.date) < entry.date && sameDishName(dish.title, entry.source));
+    if (before) {
+      entry.leftover = { id: before.id, title: before.title, date: D.dbDateToIso(before.date) };
+      entry.title = before.title;
+    }
+  });
+
+  // Igual que al añadir un plato a mano: receta entera y lo que sobra, al táper.
+  for (const entry of entries) {
+    if (!TAPER_KINDS.includes(entry.kind)) {
+      entry.extra_servings = 0;
+      continue;
+    }
+    const servings = entry.kind === "RECIPE" ? entry.recipe?.servings || 0 : 0;
+    const needed = householdSize + entry.consumers;
+    entry.extra_servings = Math.min(50, servings ? Math.ceil(needed / servings) * servings - householdSize : entry.consumers);
+  }
+
+  return {
+    weekStart,
+    mode,
+    entries,
+    newRecipes,
+    reusedRecipes,
+    warnings,
+    people,
+    weekDishes,
+    replaced,
+    replacedIds,
+    householdSize,
+  };
+};
+
+const serializeMenuPlan = (plan) => {
+  const days = [];
+  for (const entry of plan.entries) {
+    let day = days.find((item) => item.date === entry.date);
+    if (!day) {
+      day = { date: entry.date, meals: [] };
+      days.push(day);
+    }
+    let meal = day.meals.find((item) => item.meal_type_id === entry.meal_type_id);
+    if (!meal) {
+      meal = { meal_type_id: entry.meal_type_id, name: entry.meal_name, dishes: [] };
+      day.meals.push(meal);
+    }
+    meal.dishes.push({
+      key: entry.key,
+      kind: entry.kind,
+      title: entry.title,
+      recipe: entry.recipe ? { name: entry.recipe.name, status: entry.recipe.status, servings: entry.recipe.servings } : null,
+      suggestion: entry.suggestion && !entry.recipe ? { name: entry.suggestion.name, status: entry.suggestion.status } : null,
+      accepted: Boolean(entry.suggestion && entry.recipe),
+      leftover_of: entry.leftover ? { title: entry.leftover.title, date: entry.leftover.date } : null,
+      extra_servings: entry.extra_servings,
+    });
+  }
+  return {
+    week_start: plan.weekStart,
+    days,
+    dish_count: plan.entries.length,
+    new_recipes: plan.newRecipes.map((recipe) => ({
+      name: recipe.name,
+      servings: recipe.servings,
+      ingredients: recipe.ingredients.length,
+      steps: recipe.steps.length,
+      errors: recipe.errors || [],
+    })),
+    reused_recipes: plan.reusedRecipes,
+    warnings: plan.warnings,
+    replace_count: plan.replaced.length,
+    household_size: plan.householdSize,
+  };
+};
+
+router.post("/home/:home_id/menu/import/preview", expensiveUserRateLimiter, handle(async (req, res) => {
+  const home = await requireHome(req, req.params.home_id);
+  const plan = await planMenuImport(home, req.body || {});
+  res.json({ success: true, ...serializeMenuPlan(plan) });
+}));
+
+router.post("/home/:home_id/menu/import", expensiveUserRateLimiter, handle(async (req, res) => {
+  const home = await requireHome(req, req.params.home_id);
+  const plan = await planMenuImport(home, req.body || {});
+
+  // Recetas nuevas: solo las que usa el menú o vienen pegadas y no están ya en el recetario.
+  const recipeInputs = plan.newRecipes.map((recipe) => ({
+    key: recipe.key,
+    input: P.sanitizeRecipeInput({ ...recipe, source: "ChatGPT" }),
+  }));
+  if (recipeInputs.length) await ensureRecipeLimit(home.id, recipeInputs.length);
+  if (recipeInputs.length) {
+    const items = await homeItems(home.id);
+    for (const { input } of recipeInputs) {
+      for (const ingredient of input.ingredients) {
+        const match = P.matchProduct(ingredient.name, items);
+        if (match.status === "found") ingredient.item_id = match.item.id;
+      }
+    }
+  }
+  const recipeIds = new Map(recipeInputs.map(({ key }) => [key, crypto.randomUUID()]));
+
+  const dinerCreate = [
+    ...plan.people.members.map((member) => ({ user_id: member.id })),
+    ...plan.people.diners.filter((diner) => diner.kind === "HOUSEHOLD").map((diner) => ({ diner_id: diner.id })),
+  ];
+
+  const nextPosition = new Map();
+  for (const dish of plan.weekDishes) {
+    if (plan.replacedIds.has(dish.id)) continue;
+    const key = `${D.dbDateToIso(dish.date)}|${dish.meal_type_id}`;
+    nextPosition.set(key, Math.max(nextPosition.get(key) ?? 0, dish.position + 1));
+  }
+  const dishIds = plan.entries.map(() => crypto.randomUUID());
+
+  await prisma.$transaction(async (tx) => {
+    for (const { key, input } of recipeInputs) {
+      await tx.recipe.create({
+        data: {
+          id: recipeIds.get(key),
+          ...recipeData(input),
+          home_id: home.id,
+          created_by_user_id: req.user?.id || null,
+          ingredients: { create: ingredientCreateData(input.ingredients) },
+        },
+      });
+    }
+    if (plan.replacedIds.size) {
+      await tx.plannedDish.deleteMany({ where: { home_id: home.id, id: { in: [...plan.replacedIds] } } });
+    }
+    for (const [index, entry] of plan.entries.entries()) {
+      const slot = `${entry.date}|${entry.meal_type_id}`;
+      const position = nextPosition.get(slot) ?? 0;
+      nextPosition.set(slot, position + 1);
+      const recipeId = entry.recipe ? entry.recipe.id || recipeIds.get(entry.recipe.key) || null : null;
+      await tx.plannedDish.create({
+        data: {
+          id: dishIds[index],
+          home_id: home.id,
+          date: D.isoToDbDate(entry.date),
+          meal_type_id: entry.meal_type_id,
+          position,
+          kind: entry.kind === "RECIPE" && !recipeId ? "FREE" : entry.kind,
+          title: P.cleanText(entry.title, 120) || "Plato",
+          recipe_id: recipeId,
+          leftover_of_id: entry.leftover ? entry.leftover.id || dishIds[entry.leftover.index] : null,
+          extra_servings: entry.extra_servings,
+          guests: 0,
+          created_by_user_id: req.user?.id || null,
+          diners: { create: dinerCreate },
+        },
+      });
+    }
+  }, { timeout: 20000 });
+
+  res.status(201).json({
+    success: true,
+    week_start: plan.weekStart,
+    created: plan.entries.length,
+    replaced: plan.replacedIds.size,
+    recipes_created: recipeInputs.length,
+  });
+}));
+
+// ---------------------------------------------------------------------------
 // Compra: vista previa y aplicar
 // ---------------------------------------------------------------------------
 const ingredientsOf = (dish) => (dish.recipe || dish.recipe_snapshot || null);
@@ -1003,6 +1307,7 @@ router.post("/home/:home_id/shopping/apply", expensiveUserRateLimiter, handle(as
     if (body.list_id) {
       list = await tx.list.findFirst({ where: { id: String(body.list_id), home_id: home.id }, select: { id: true } });
       if (!list) fail("La lista no es de este hogar");
+      await tx.list.update({ where: { id: list.id }, data: { listCheck: false } });
     } else {
       list = await tx.list.create({ data: { title: listTitle, home_id: home.id }, select: { id: true } });
     }

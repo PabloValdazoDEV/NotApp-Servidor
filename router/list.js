@@ -463,6 +463,24 @@ router.post("/update-list/:id_list", authMiddleware, async (req, res) => {
   }
 });
 
+// Cierra una compra terminada sin pasar lo que falta a otra lista (o la reabre).
+router.post("/finish/:id_list", authMiddleware, async (req, res) => {
+  const { id_list } = req.params;
+  const finished = req.body?.finished !== false;
+  try {
+    const list = await getAccessibleList(req.user?.id, id_list);
+    if (!list) {
+      return res.status(403).json({ message: "No tienes permisos para modificar esta lista" });
+    }
+    await prisma.list.update({ where: { id: id_list }, data: { listCheck: finished } });
+    req.app.get("io")?.to(`list:${id_list}`).emit("list:changed", { list_id: id_list });
+    res.json({ success: true, list_id: id_list, listCheck: finished });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 router.post("/update-itemlist/:id_itemList", authMiddleware, async (req, res) => {
   const { id_itemList } = req.params;
   const { quantity, quantity_delta, purchased_quantity, check_take, status, clientMutationId } = req.body;
