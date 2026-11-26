@@ -9,6 +9,7 @@ const member = require("./member");
 const profile = require("./profile");
 const onboarding = require("./onboarding");
 const menu = require("./menu");
+const menuV2 = require("./menuV2");
 
 router.use("/home", home);
 router.use("/member", member);
@@ -16,6 +17,7 @@ router.use("/list", list);
 router.use("/item", item);
 router.use("/profile", profile);
 router.use("/onboarding", onboarding);
+router.use("/menu/v2", menuV2);
 router.use("/menu", menu);
 router.use("/", auth);
 

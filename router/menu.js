@@ -4,6 +4,7 @@ const { DateTime } = require("luxon");
 const prisma = require("../prisma/prisma");
 const authMiddleware = require("../middleware/auth.middleware");
 const { getAccessibleHome } = require("../utils/permissions");
+const menuData = require("../utils/menuData");
 const {
   expensiveUserRateLimiter,
   publicMenuRateLimiter,
@@ -84,12 +85,9 @@ const isAllowedWeekStart = (weekStartIso) =>
 
 const getEmptyMeal = () => ({ title: null, notes: null });
 
-const getEmptyDay = (date) => ({
+const getEmptyDay = (date, keys = MENU_MEAL_TYPES) => ({
   date: date.toISODate(),
-  meals: {
-    COMIDA: getEmptyMeal(),
-    CENA: getEmptyMeal(),
-  },
+  meals: Object.fromEntries(keys.map((key) => [key, getEmptyMeal()])),
 });
 
 const cleanMenuValue = (value = "") => {
@@ -149,7 +147,11 @@ const parseMealValue = (value) => {
   return { title, notes };
 };
 
-const parseMenuImportText = (text) => {
+// extraKeys: nombres normalizados de otros tipos de comida del hogar
+// (DESAYUNO, MERIENDA...). COMIDA y CENA siempre se reconocen.
+const parseMenuImportText = (text, extraKeys = []) => {
+  const mealKeys = [...new Set([...MENU_MEAL_TYPES, ...extraKeys])];
+  const mentioned = new Set();
   const lines = String(text || "")
     .split(/\r?\n/)
     .map((line) => line.trim());
@@ -187,9 +189,9 @@ const parseMenuImportText = (text) => {
   const days =
     header.mode === "week"
       ? Array.from({ length: 7 }, (_, index) =>
-          getEmptyDay(weekStart.plus({ days: index }))
+          getEmptyDay(weekStart.plus({ days: index }), mealKeys)
         )
-      : [getEmptyDay(headerDate)];
+      : [getEmptyDay(headerDate, mealKeys)];
   const daysByIso = new Map(days.map((day) => [day.date, day]));
   let currentDay =
     header.mode === "day" ? daysByIso.get(headerDate.toISODate()) : null;
@@ -210,7 +212,8 @@ const parseMenuImportText = (text) => {
     const parsedLine = parseKeyValueLine(line);
     if (!parsedLine) return;
 
-    if (MENU_MEAL_TYPES.includes(parsedLine.key)) {
+    if (mealKeys.includes(parsedLine.key)) {
+      mentioned.add(parsedLine.key);
       currentDay.meals[parsedLine.key] = {
         ...currentDay.meals[parsedLine.key],
         ...parseMealValue(parsedLine.value),
@@ -218,13 +221,12 @@ const parseMenuImportText = (text) => {
       return;
     }
 
-    if (parsedLine.key === "NOTAS COMIDA") {
-      currentDay.meals.COMIDA.notes = cleanMenuValue(parsedLine.value);
-      return;
-    }
-
-    if (parsedLine.key === "NOTAS CENA") {
-      currentDay.meals.CENA.notes = cleanMenuValue(parsedLine.value);
+    const notesKey = parsedLine.key.startsWith("NOTAS ")
+      ? parsedLine.key.slice(6)
+      : null;
+    if (notesKey && mealKeys.includes(notesKey)) {
+      mentioned.add(notesKey);
+      currentDay.meals[notesKey].notes = cleanMenuValue(parsedLine.value);
     }
   });
 
@@ -233,6 +235,7 @@ const parseMenuImportText = (text) => {
     requestedDate: header.dateIso,
     weekStart: weekStartIso,
     affectedDays: days.map((day) => day.date),
+    mentionedKeys: [...mentioned],
     days,
   };
 };
@@ -247,99 +250,99 @@ const buildWeekSkeleton = (weekStartIso) => {
   };
 };
 
+// Respuesta antigua (COMIDA/CENA) construida desde los platos nuevos, para las
+// versiones anteriores de la app y el enlace público antiguo.
 const getMenuWeeksForHome = async (homeId) => {
+  await menuData.ensureMenuSetup(homeId);
   const { weekStarts } = getAllowedWindow();
-  const menus = await prisma.weeklyMenu.findMany({
+  const first = weekStarts[0];
+  const last = DateTime.fromISO(weekStarts[weekStarts.length - 1]).plus({ days: 6 }).toISODate();
+  const types = await prisma.mealType.findMany({
+    where: { home_id: homeId, legacy_type: { not: null } },
+    select: { id: true, legacy_type: true },
+  });
+  const legacyByTypeId = new Map(types.map((type) => [type.id, type.legacy_type]));
+  const dishes = await prisma.plannedDish.findMany({
     where: {
       home_id: homeId,
-      week_start: {
-        in: weekStarts.map(dateOnlyToDate),
-      },
+      meal_type_id: { in: types.map((type) => type.id) },
+      date: { gte: dateOnlyToDate(first), lte: dateOnlyToDate(last) },
     },
-    include: {
-      meals: true,
-    },
-    orderBy: {
-      week_start: "asc",
-    },
+    orderBy: [{ date: "asc" }, { position: "asc" }, { createdAt: "asc" }],
+    select: { date: true, meal_type_id: true, title: true, notes: true },
   });
+
   const weeks = weekStarts.map(buildWeekSkeleton);
-  const weeksByStart = new Map(weeks.map((week) => [week.weekStart, week]));
-
-  menus.forEach((menu) => {
-    const weekStartIso = dbDateToIso(menu.week_start);
-    const week = weeksByStart.get(weekStartIso);
-    if (!week) return;
-
-    const daysByIso = new Map(week.days.map((day) => [day.date, day]));
-    menu.meals.forEach((meal) => {
-      const day = daysByIso.get(dbDateToIso(meal.day_date));
-      if (!day || !MENU_MEAL_TYPES.includes(meal.type)) return;
-
-      day.meals[meal.type] = {
-        title: meal.title || null,
-        notes: meal.notes || null,
-      };
-    });
+  const daysByIso = new Map(weeks.flatMap((week) => week.days).map((day) => [day.date, day]));
+  dishes.forEach((dish) => {
+    const day = daysByIso.get(dbDateToIso(dish.date));
+    const type = legacyByTypeId.get(dish.meal_type_id);
+    if (!day || !type) return;
+    const meal = day.meals[type];
+    meal.title = meal.title ? `${meal.title} / ${dish.title}` : dish.title;
+    if (dish.notes && !meal.notes) meal.notes = dish.notes;
   });
 
   return weeks;
 };
 
-const createMenuMeals = async (tx, weeklyMenuId, parsedDays) =>
-  tx.menuMeal.createMany({
-    data: parsedDays.flatMap((day) =>
-      MENU_MEAL_TYPES.map((type) => ({
-        weekly_menu_id: weeklyMenuId,
-        day_date: dateOnlyToDate(day.date),
-        type,
-        title: day.meals[type].title,
-        notes: day.meals[type].notes,
-      }))
-    ),
+// Claves de importación de los tipos de comida del hogar (además de COMIDA/CENA).
+const getImportKeys = async (homeId) => {
+  await menuData.ensureMenuSetup(homeId);
+  const types = await prisma.mealType.findMany({
+    where: { home_id: homeId, deleted_at: null, legacy_type: null },
+    select: { name: true },
+  });
+  return types.map((type) => normalizeTextKey(type.name)).filter(Boolean);
+};
+
+// Sustituye los platos de los días importados. Solo toca COMIDA, CENA y los
+// tipos que aparecen en el texto; el resto de comidas de esos días se conserva.
+const applyMenuImport = async ({ homeId, userId, parsedMenu }) => {
+  await menuData.ensureMenuSetup(homeId);
+  const types = await prisma.mealType.findMany({
+    where: { home_id: homeId, deleted_at: null },
+    select: { id: true, name: true, legacy_type: true },
+  });
+  const typeIdByKey = new Map();
+  types.forEach((type) => {
+    if (type.legacy_type) typeIdByKey.set(type.legacy_type, type.id);
+  });
+  types.forEach((type) => {
+    const key = normalizeTextKey(type.name);
+    if (!typeIdByKey.has(key)) typeIdByKey.set(key, type.id);
   });
 
-const applyMenuImport = async ({ homeId, userId, parsedMenu }) =>
-  prisma.$transaction(async (tx) => {
-    const weeklyMenu = await tx.weeklyMenu.upsert({
+  const keys = [...new Set([...MENU_MEAL_TYPES, ...(parsedMenu.mentionedKeys || [])])]
+    .filter((key) => typeIdByKey.has(key));
+  const typeIds = keys.map((key) => typeIdByKey.get(key));
+
+  return prisma.$transaction(async (tx) => {
+    await tx.plannedDish.deleteMany({
       where: {
-        home_id_week_start: {
-          home_id: homeId,
-          week_start: dateOnlyToDate(parsedMenu.weekStart),
-        },
-      },
-      update: {},
-      create: {
         home_id: homeId,
-        week_start: dateOnlyToDate(parsedMenu.weekStart),
-        created_by_user_id: userId,
-      },
-      select: {
-        id: true,
+        meal_type_id: { in: typeIds },
+        date: { in: parsedMenu.affectedDays.map(dateOnlyToDate) },
       },
     });
-
-    if (parsedMenu.mode === "week") {
-      await tx.menuMeal.deleteMany({
-        where: {
-          weekly_menu_id: weeklyMenu.id,
-        },
-      });
-    } else {
-      await tx.menuMeal.deleteMany({
-        where: {
-          weekly_menu_id: weeklyMenu.id,
-          day_date: {
-            in: parsedMenu.affectedDays.map(dateOnlyToDate),
-          },
-        },
-      });
-    }
-
-    await createMenuMeals(tx, weeklyMenu.id, parsedMenu.days);
-
-    return weeklyMenu;
+    const data = parsedMenu.days.flatMap((day) =>
+      keys
+        .map((key) => ({ key, meal: day.meals[key] }))
+        .filter(({ meal }) => meal && (meal.title || meal.notes))
+        .map(({ key, meal }) => ({
+          home_id: homeId,
+          date: dateOnlyToDate(day.date),
+          meal_type_id: typeIdByKey.get(key),
+          kind: "FREE",
+          title: meal.title || "Sin título",
+          notes: meal.notes || null,
+          created_by_user_id: userId || null,
+        }))
+    );
+    if (data.length) await tx.plannedDish.createMany({ data });
+    return { created: data.length };
   });
+};
 
 const hashPublicToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
@@ -474,7 +477,7 @@ router.post("/import/preview", expensiveUserRateLimiter, async (req, res) => {
       });
     }
 
-    const parsedMenu = parseMenuImportText(text);
+    const parsedMenu = parseMenuImportText(text, await getImportKeys(home_id));
 
     return res.json({
       success: true,
@@ -500,7 +503,7 @@ router.post("/import", expensiveUserRateLimiter, async (req, res) => {
       });
     }
 
-    const parsedMenu = parseMenuImportText(text);
+    const parsedMenu = parseMenuImportText(text, await getImportKeys(home_id));
     await applyMenuImport({ homeId: home_id, userId, parsedMenu });
 
     return res.json({
@@ -570,3 +573,4 @@ router.post("/home/:home_id/public-token", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.parseMenuImportText = parseMenuImportText;

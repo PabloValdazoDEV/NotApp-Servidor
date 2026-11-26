@@ -41,6 +41,7 @@ const itemListSelect = {
   purchased_quantity: true,
   check_take: true,
   status: true,
+  detail: true,
   updatedAt: true,
   item: {
     select: itemSelect,
@@ -778,6 +779,7 @@ router.get("/:id_home/:id_list", authMiddleware, async (req, res) => {
         list_id: true,
         quantity: true,
         purchased_quantity: true,
+        detail: true,
         item: {
           select: itemSelect,
         },

@@ -11,6 +11,9 @@ const DEFAULT_PREMIUM_HOME_SLOTS = 2;
 const HOME_LIMITS = {
   FREE: {
     plan: USER_PLAN.FREE,
+    // Menús: recetas guardadas y personas sin cuenta (hogar + invitados con ficha).
+    maxRecipes: 40,
+    maxDiners: 10,
     maxMembers: 4,
     maxProductImages: 50,
     autoImageImportEnabled: false,
@@ -18,6 +21,9 @@ const HOME_LIMITS = {
   },
   PREMIUM: {
     plan: USER_PLAN.PREMIUM,
+    // Menús: recetas guardadas y personas sin cuenta (hogar + invitados con ficha).
+    maxRecipes: 1000,
+    maxDiners: 60,
     maxMembers: 8,
     maxProductImages: 500,
     autoImageImportEnabled: true,
@@ -25,6 +31,9 @@ const HOME_LIMITS = {
   },
   APP_OWNER: {
     plan: USER_PLAN.APP_OWNER,
+    // Menús: recetas guardadas y personas sin cuenta (hogar + invitados con ficha).
+    maxRecipes: 5000,
+    maxDiners: 200,
     maxMembers: 8,
     maxProductImages: 5000,
     autoImageImportEnabled: true,

@@ -115,6 +115,7 @@ io.on("connection", (socket) => {
               purchased_quantity: true,
               check_take: true,
               status: true,
+              detail: true,
               updatedAt: true,
               item: {
                 select: {

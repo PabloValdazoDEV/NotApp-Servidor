@@ -138,6 +138,12 @@ model Home {
   favoriteBy                  HomeFavorite[]
   menuTokens                  MenuPublicToken[]
   weeklyMenus                 WeeklyMenu[]
+  mealTypes                   MealType[]
+  diners                      Diner[]
+  dinerGroups                 DinerGroup[]
+  recipes                     Recipe[]
+  plannedDishes               PlannedDish[]
+  menu_v2_ready_at            DateTime?
   lists                       List[]
   items                       Item[]
   createdAt                   DateTime          @default(now())
@@ -159,52 +165,54 @@ model HomeFavorite {
 }
 
 model List {
-  id                            String     @id @default(uuid())
+  id                            String          @id @default(uuid())
   title                         String
   home_id                       String
-  fav                           Boolean    @default(false)
-  listCheck                     Boolean    @default(false)
+  fav                           Boolean         @default(false)
+  listCheck                     Boolean         @default(false)
   copied_from_not_found_list_id String?
   itemsList                     ItemList[]
-  outgoingCarry                 ShoppingCarry? @relation("ShoppingCarrySource")
+  outgoingCarry                 ShoppingCarry?  @relation("ShoppingCarrySource")
   incomingCarries               ShoppingCarry[] @relation("ShoppingCarryTarget")
-  home                          Home       @relation(fields: [home_id], references: [id], onDelete: Cascade)
-  createdAt                     DateTime?  @default(now())
-  updatedAt                     DateTime?  @updatedAt
+  home                          Home            @relation(fields: [home_id], references: [id], onDelete: Cascade)
+  createdAt                     DateTime?       @default(now())
+  updatedAt                     DateTime?       @updatedAt
 }
 
 model ItemList {
-  id                 String           @id @default(uuid())
-  item_id            String
-  list_id            String
-  quantity           Int              @default(1)
-  purchased_quantity Int              @default(0)
-  check_take         Boolean          @default(false)
-  status             ITEM_LIST_STATUS @default(PENDING)
+  id                  String           @id @default(uuid())
+  item_id             String
+  list_id             String
+  quantity            Int              @default(1)
+  purchased_quantity  Int              @default(0)
+  check_take          Boolean          @default(false)
+  status              ITEM_LIST_STATUS @default(PENDING)
+  detail              String?
   created_mutation_id String?
-  list               List             @relation(fields: [list_id], references: [id], onDelete: Cascade)
-  item               Item             @relation(fields: [item_id], references: [id], onDelete: Cascade)
-  createdAt          DateTime?        @default(now())
-  updatedAt          DateTime?        @updatedAt
+  list                List             @relation(fields: [list_id], references: [id], onDelete: Cascade)
+  item                Item             @relation(fields: [item_id], references: [id], onDelete: Cascade)
+  createdAt           DateTime?        @default(now())
+  updatedAt           DateTime?        @updatedAt
 
-  @@index([item_id, list_id])
   @@unique([list_id, created_mutation_id])
+  @@index([item_id, list_id])
 }
 
 model Item {
-  id           String      @id @default(uuid())
-  name         String
-  home_id      String
-  image        String?
-  price        String?
-  description  String?
-  categories   CATEGORY[]
-  supermarket  SUPERMARKET @default(CUALQUIERA)
-  is_recurring Boolean     @default(false)
-  itemsList    ItemList[]
-  home         Home        @relation(fields: [home_id], references: [id], onDelete: Cascade)
-  createdAt    DateTime?   @default(now())
-  updatedAt    DateTime?   @updatedAt
+  id                String             @id @default(uuid())
+  name              String
+  home_id           String
+  image             String?
+  price             String?
+  description       String?
+  categories        CATEGORY[]
+  supermarket       SUPERMARKET        @default(CUALQUIERA)
+  is_recurring      Boolean            @default(false)
+  itemsList         ItemList[]
+  recipeIngredients RecipeIngredient[]
+  home              Home               @relation(fields: [home_id], references: [id], onDelete: Cascade)
+  createdAt         DateTime?          @default(now())
+  updatedAt         DateTime?          @updatedAt
 }
 
 model WeeklyMenu {
@@ -263,45 +271,190 @@ model OneTimeToken {
 }
 
 model PendingRegistration {
-  id            String   @id @default(uuid())
-  email         String   @unique
-  name          String
-  password      String
-  code_hash     String
-  invite_token  String?
-  attempts      Int      @default(0)
-  expiresAt     DateTime
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String
+  password     String
+  code_hash    String
+  invite_token String?
+  attempts     Int      @default(0)
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   @@index([expiresAt])
 }
 
 // Keeps the source result and records only the units added to the destination.
 model ShoppingCarry {
-  id                 String   @id @default(uuid())
-  source_list_id     String   @unique
+  id                 String    @id @default(uuid())
+  source_list_id     String    @unique
   target_list_id     String
   created_by_user_id String?
-  created_target    Boolean  @default(false)
+  created_target     Boolean   @default(false)
   deltas             Json
   undone_at          DateTime?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-  source             List @relation("ShoppingCarrySource", fields: [source_list_id], references: [id], onDelete: Cascade)
-  target             List @relation("ShoppingCarryTarget", fields: [target_list_id], references: [id], onDelete: Cascade)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  source             List      @relation("ShoppingCarrySource", fields: [source_list_id], references: [id], onDelete: Cascade)
+  target             List      @relation("ShoppingCarryTarget", fields: [target_list_id], references: [id], onDelete: Cascade)
+
   @@index([target_list_id])
 }
 
 // An acknowledgement retry returns the current row instead of applying an add twice.
 model ShoppingMutation {
-  id            String @id @default(uuid())
-  list_id       String
-  mutation_id   String
-  user_id       String
-  item_list_id  String
-  operation     String
-  createdAt     DateTime @default(now())
+  id           String   @id @default(uuid())
+  list_id      String
+  mutation_id  String
+  user_id      String
+  item_list_id String
+  operation    String
+  createdAt    DateTime @default(now())
+
   @@unique([list_id, mutation_id])
   @@index([item_list_id])
+}
+
+// ---------------------------------------------------------------------------
+// Menús y recetas (v2). Todo es aditivo: WeeklyMenu y MenuMeal se conservan
+// intactos y su contenido se copia a PlannedDish la primera vez que se abre
+// el menú de cada hogar (Home.menu_v2_ready_at).
+// ---------------------------------------------------------------------------
+
+// Tipos de comida configurables por hogar (Desayuno, Comida, ...).
+model MealType {
+  id           String          @id @default(uuid())
+  home_id      String
+  name         String
+  default_time String?
+  position     Int             @default(0)
+  active       Boolean         @default(true)
+  legacy_type  MENU_MEAL_TYPE?
+  deleted_at   DateTime?
+  home         Home            @relation(fields: [home_id], references: [id], onDelete: Cascade)
+  dishes       PlannedDish[]
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  @@index([home_id, position])
+}
+
+// Personas sin cuenta: del hogar (HOUSEHOLD) o invitados con ficha (GUEST).
+model Diner {
+  id        String             @id @default(uuid())
+  home_id   String
+  name      String
+  kind      String             @default("HOUSEHOLD")
+  group_id  String?
+  home      Home               @relation(fields: [home_id], references: [id], onDelete: Cascade)
+  group     DinerGroup?        @relation(fields: [group_id], references: [id], onDelete: SetNull)
+  dishes    PlannedDishDiner[]
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+
+  @@index([home_id])
+  @@index([group_id])
+}
+
+// Grupos de invitados (por ejemplo, "Suegros").
+model DinerGroup {
+  id        String   @id @default(uuid())
+  home_id   String
+  name      String
+  home      Home     @relation(fields: [home_id], references: [id], onDelete: Cascade)
+  diners    Diner[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([home_id])
+}
+
+model Recipe {
+  id                 String             @id @default(uuid())
+  home_id            String
+  name               String
+  servings           Int                @default(4)
+  prep_minutes       Int?
+  difficulty         String?
+  tags               String[]
+  steps              String[]
+  notes              String?
+  source             String?
+  favorite           Boolean            @default(false)
+  created_by_user_id String?
+  home               Home               @relation(fields: [home_id], references: [id], onDelete: Cascade)
+  ingredients        RecipeIngredient[]
+  dishes             PlannedDish[]
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@index([home_id, name])
+}
+
+// Cantidad + unidad de cocina. item_id recuerda el producto elegido la
+// primera vez que se añadió a la compra; el nombre solo se usa para buscarlo.
+model RecipeIngredient {
+  id        String  @id @default(uuid())
+  recipe_id String
+  position  Int     @default(0)
+  name      String
+  quantity  Float?
+  unit      String  @default("UD")
+  pantry    Boolean @default(false)
+  item_id   String?
+  recipe    Recipe  @relation(fields: [recipe_id], references: [id], onDelete: Cascade)
+  item      Item?   @relation(fields: [item_id], references: [id], onDelete: SetNull)
+
+  @@index([recipe_id, position])
+  @@index([item_id])
+}
+
+// Un plato dentro de una comida. kind: RECIPE | FREE | LEFTOVER | OUT.
+model PlannedDish {
+  id                  String             @id @default(uuid())
+  home_id             String
+  date                DateTime           @db.Date
+  meal_type_id        String
+  position            Int                @default(0)
+  kind                String             @default("FREE")
+  title               String
+  time                String?
+  notes               String?
+  recipe_id           String?
+  recipe_snapshot     Json?
+  guests              Int                @default(0)
+  extra_servings      Int                @default(0)
+  leftover_of_id      String?
+  added_to_list_at    DateTime?
+  added_to_list_id    String?
+  legacy_menu_meal_id String?            @unique
+  created_by_user_id  String?
+  home                Home               @relation(fields: [home_id], references: [id], onDelete: Cascade)
+  mealType            MealType           @relation(fields: [meal_type_id], references: [id], onDelete: NoAction)
+  recipe              Recipe?            @relation(fields: [recipe_id], references: [id], onDelete: SetNull)
+  leftoverOf          PlannedDish?       @relation("DishLeftovers", fields: [leftover_of_id], references: [id], onDelete: SetNull)
+  leftovers           PlannedDish[]      @relation("DishLeftovers")
+  diners              PlannedDishDiner[]
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  @@index([home_id, date])
+  @@index([meal_type_id])
+  @@index([recipe_id])
+  @@index([leftover_of_id])
+}
+
+// Quién come un plato: un miembro con cuenta (user_id) o un Diner.
+model PlannedDishDiner {
+  id       String      @id @default(uuid())
+  dish_id  String
+  user_id  String?
+  diner_id String?
+  dish     PlannedDish @relation(fields: [dish_id], references: [id], onDelete: Cascade)
+  diner    Diner?      @relation(fields: [diner_id], references: [id], onDelete: Cascade)
+
+  @@unique([dish_id, user_id])
+  @@unique([dish_id, diner_id])
+  @@index([diner_id])
 }
